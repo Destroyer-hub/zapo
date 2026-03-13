@@ -1,4 +1,4 @@
-import { toBytesView } from '@util/bytes'
+import { base64ToBytes } from '@util/bytes'
 
 /**
  * Base64 URL encoding utilities
@@ -15,7 +15,7 @@ export function decodeBase64Url(value: string | undefined, field: string): Uint8
         .replace(/-/g, '+')
         .replace(/_/g, '/')
         .padEnd(Math.ceil(value.length / 4) * 4, '=')
-    return toBytesView(Buffer.from(padded, 'base64'))
+    return base64ToBytes(padded)
 }
 
 /**

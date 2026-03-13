@@ -27,6 +27,13 @@ import { TEXT_DECODER, TEXT_ENCODER, toBytesView } from '@util/bytes'
 
 const unzipAsync = promisify(unzip)
 const inflateRawAsync = promisify(inflateRaw)
+const JID_U_DOMAIN_TYPE_LID = 0x01
+const JID_U_DOMAIN_TYPE_HOSTED_LID = 0x81
+const JID_U_DOMAIN_TYPE_HOSTED_MASK = 0x80
+const JID_U_DOMAIN_TYPE_LID_MASK = 0x01
+const JID_U_DOMAIN_LID = 'lid'
+const JID_U_DOMAIN_HOSTED = 'hosted'
+const JID_U_DOMAIN_HOSTED_LID = 'hosted.lid'
 
 class ByteReader {
     private readonly data: Uint8Array
@@ -168,12 +175,15 @@ function decodeJidU(reader: ByteReader): string {
     const user = decodeTokenString(reader.readUint8(), reader)
 
     let domain: string = WA_DEFAULTS.HOST_DOMAIN
-    if (domainType === 1) {
-        domain = 'lid'
-    } else if (domainType === 129) {
-        domain = 'hosted.lid'
-    } else if ((domainType & 0x80) !== 0 && (domainType & 1) === 0) {
-        domain = 'hosted'
+    if (domainType === JID_U_DOMAIN_TYPE_LID) {
+        domain = JID_U_DOMAIN_LID
+    } else if (domainType === JID_U_DOMAIN_TYPE_HOSTED_LID) {
+        domain = JID_U_DOMAIN_HOSTED_LID
+    } else if (
+        (domainType & JID_U_DOMAIN_TYPE_HOSTED_MASK) !== 0 &&
+        (domainType & JID_U_DOMAIN_TYPE_LID_MASK) === 0
+    ) {
+        domain = JID_U_DOMAIN_HOSTED
     }
 
     if (device > 0) {

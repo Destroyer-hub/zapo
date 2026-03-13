@@ -1,7 +1,6 @@
 import { APP_STATE_DEFAULT_COLLECTIONS, APP_STATE_EMPTY_LT_HASH } from '@appstate/constants'
 import type {
     AppStateCollectionName,
-    AppStateCollectionState,
     WaAppStateCollectionSyncResult,
     WaAppStateMutation,
     WaAppStateMutationInput,
@@ -10,47 +9,31 @@ import type {
     WaAppStateSyncResult,
     WaAppStateSyncKey
 } from '@appstate/types'
-import { keyIdToHex, parseCollectionName } from '@appstate/utils'
+import { keyIdToHex } from '@appstate/utils'
 import { WaAppStateCrypto } from '@appstate/WaAppStateCrypto'
+import {
+    type CollectionResponsePayload,
+    parseSyncResponse
+} from '@appstate/WaAppStateSyncResponseParser'
 import type { Logger } from '@infra/log/types'
 import { proto } from '@proto'
 import type { Proto } from '@proto'
 import {
     WA_APP_STATE_COLLECTION_STATES,
-    WA_APP_STATE_ERROR_CODES,
     WA_DEFAULTS,
     WA_IQ_TYPES,
     WA_NODE_TAGS,
     WA_XMLNS
 } from '@protocol/constants'
 import type {
+    WaAppStateCollectionStateUpdate,
     WaAppStateCollectionStoreState,
     WaAppStateStore
 } from '@store/contracts/appstate.store'
-import {
-    decodeBinaryNodeContent,
-    findNodeChild,
-    getNodeChildrenByTag
-} from '@transport/node/helpers'
 import type { BinaryNode } from '@transport/types'
 import { decodeProtoBytes } from '@util/base64'
-import { cloneBytes, uint8Equal } from '@util/bytes'
+import { uint8Equal } from '@util/bytes'
 import { longToNumber } from '@util/primitives'
-
-class WaAppStateMissingKeyError extends Error {
-    public constructor(message: string) {
-        super(message)
-        this.name = 'WaAppStateMissingKeyError'
-    }
-}
-
-interface CollectionResponsePayload {
-    readonly collection: AppStateCollectionName
-    readonly state: AppStateCollectionState
-    readonly version?: number
-    readonly patches: readonly Proto.ISyncdPatch[]
-    readonly snapshotReference?: Proto.IExternalBlobReference
-}
 
 interface OutgoingPatchContext {
     readonly collection: AppStateCollectionName
@@ -64,6 +47,13 @@ interface MacMutation {
     readonly indexMac: Uint8Array
     readonly valueMac: Uint8Array
 }
+
+interface DecryptedSnapshotRecord {
+    readonly decrypted: Awaited<ReturnType<WaAppStateCrypto['decryptMutation']>>
+    readonly recordKeyId: Uint8Array
+}
+
+type DecryptedPatchMutation = WaAppStateMutation & { operationCode: number }
 
 interface WaAppStateSyncClientOptions {
     readonly logger: Logger
@@ -85,6 +75,45 @@ interface SyncRoundResult {
     readonly stateChanged: boolean
 }
 
+interface PreparedCollectionRequest {
+    readonly collection: AppStateCollectionName
+    readonly node: BinaryNode
+    readonly outgoingContext?: OutgoingPatchContext
+    readonly skippedUpload: boolean
+}
+
+interface PreparedSyncRoundRequest {
+    readonly collectionNodes: readonly BinaryNode[]
+    readonly outgoingContexts: ReadonlyMap<AppStateCollectionName, OutgoingPatchContext>
+    readonly skippedUploadCollections: ReadonlySet<AppStateCollectionName>
+}
+
+interface CollectionSyncOutcome {
+    readonly collection: AppStateCollectionName
+    readonly shouldRefetch: boolean
+    readonly stateChanged: boolean
+    readonly result: WaAppStateCollectionSyncResult
+}
+
+interface ProtoLongLike {
+    toNumber(): number
+}
+
+function isProtoLongLike(value: unknown): value is ProtoLongLike {
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        typeof (value as { toNumber?: unknown }).toNumber === 'function'
+    )
+}
+
+export class WaAppStateMissingKeyError extends Error {
+    public constructor(message: string) {
+        super(message)
+        this.name = 'WaAppStateMissingKeyError'
+    }
+}
+
 export class WaAppStateSyncClient {
     private readonly logger: Logger
     private readonly query: (node: BinaryNode, timeoutMs: number) => Promise<BinaryNode>
@@ -92,6 +121,7 @@ export class WaAppStateSyncClient {
     private readonly hostDomain: string
     private readonly defaultTimeoutMs: number
     private readonly crypto: WaAppStateCrypto
+    private syncPromise: Promise<WaAppStateSyncResult> | null
 
     public constructor(options: WaAppStateSyncClientOptions) {
         this.logger = options.logger
@@ -101,6 +131,7 @@ export class WaAppStateSyncClient {
         this.defaultTimeoutMs = options.defaultTimeoutMs ?? WA_DEFAULTS.APP_STATE_SYNC_TIMEOUT_MS
 
         this.crypto = new WaAppStateCrypto()
+        this.syncPromise = null
     }
 
     public async exportState(): Promise<WaAppStateStoreData> {
@@ -132,8 +163,9 @@ export class WaAppStateSyncClient {
             keys.push({
                 keyId,
                 keyData,
-                timestamp: longToNumber(
-                    item.keyData?.timestamp as number | { toNumber(): number } | null | undefined
+                timestamp: this.normalizeProtoLong(
+                    item.keyData?.timestamp,
+                    'appStateSyncKeyShare.keys[].keyData.timestamp'
                 ),
                 fingerprint: item.keyData?.fingerprint ?? undefined
             })
@@ -142,10 +174,30 @@ export class WaAppStateSyncClient {
     }
 
     public async sync(options: WaAppStateSyncOptions = {}): Promise<WaAppStateSyncResult> {
-        const context = this.createContext()
-        const collections = this.normalizeCollections(
-            options.collections ?? APP_STATE_DEFAULT_COLLECTIONS
-        )
+        if (this.syncPromise) {
+            this.logger.debug('app-state sync already in flight, joining existing run')
+            return this.syncPromise
+        }
+        const inFlight = this.syncOnce(options)
+        this.syncPromise = inFlight
+        try {
+            return await inFlight
+        } finally {
+            if (this.syncPromise === inFlight) {
+                this.syncPromise = null
+            }
+        }
+    }
+
+    private async syncOnce(options: WaAppStateSyncOptions = {}): Promise<WaAppStateSyncResult> {
+        const context: WaAppStateSyncContext = {
+            keys: new Map(),
+            collections: new Map(),
+            dirtyCollections: new Set()
+        }
+        const collections = [
+            ...new Set<AppStateCollectionName>(options.collections ?? APP_STATE_DEFAULT_COLLECTIONS)
+        ]
         this.logger.info('app-state sync start', {
             collections: collections.length,
             pendingMutations: options.pendingMutations?.length ?? 0
@@ -222,58 +274,115 @@ export class WaAppStateSyncClient {
         pendingByCollection: ReadonlyMap<AppStateCollectionName, readonly WaAppStateMutationInput[]>,
         options: WaAppStateSyncOptions
     ): Promise<SyncRoundResult> {
+        const prepared = await this.prepareSyncRoundRequest(context, collections, pendingByCollection)
+        const iqNode = this.buildSyncIqNode(prepared.collectionNodes)
+        const payloadByCollection = await this.fetchSyncPayloadByCollection(
+            iqNode,
+            options.timeoutMs ?? this.defaultTimeoutMs
+        )
+        const collectionOutcomes = await Promise.all(
+            collections.map((collection) =>
+                this.processCollectionRound({
+                    context,
+                    collection,
+                    payloadByCollection,
+                    pendingByCollection,
+                    options,
+                    outgoingContexts: prepared.outgoingContexts,
+                    skippedUploadCollections: prepared.skippedUploadCollections
+                })
+            )
+        )
+        return this.toSyncRoundResult(collectionOutcomes)
+    }
+
+    private async prepareSyncRoundRequest(
+        context: WaAppStateSyncContext,
+        collections: readonly AppStateCollectionName[],
+        pendingByCollection: ReadonlyMap<AppStateCollectionName, readonly WaAppStateMutationInput[]>
+    ): Promise<PreparedSyncRoundRequest> {
+        const requests = await Promise.all(
+            collections.map((collection) =>
+                this.buildCollectionSyncRequest(context, collection, pendingByCollection)
+            )
+        )
         const outgoingContexts = new Map<AppStateCollectionName, OutgoingPatchContext>()
         const skippedUploadCollections = new Set<AppStateCollectionName>()
-        const collectionNodes: BinaryNode[] = []
-
-        for (const collection of collections) {
-            const collectionState = await this.getCollectionState(context, collection)
-            const hasPersistedState = this.hasPersistedCollectionState(collectionState)
-            const attrs: Record<string, string> = {
-                name: collection
+        for (const request of requests) {
+            if (request.outgoingContext) {
+                outgoingContexts.set(request.collection, request.outgoingContext)
             }
-            if (hasPersistedState) {
-                attrs.version = String(collectionState.version)
+            if (request.skippedUpload) {
+                skippedUploadCollections.add(request.collection)
+            }
+        }
+        return {
+            collectionNodes: requests.map((request) => request.node),
+            outgoingContexts,
+            skippedUploadCollections
+        }
+    }
+
+    private async buildCollectionSyncRequest(
+        context: WaAppStateSyncContext,
+        collection: AppStateCollectionName,
+        pendingByCollection: ReadonlyMap<AppStateCollectionName, readonly WaAppStateMutationInput[]>
+    ): Promise<PreparedCollectionRequest> {
+        const collectionState = await this.getCollectionState(context, collection)
+        const hasPersistedState =
+            collectionState.version > 0 ||
+            collectionState.indexValueMap.size > 0 ||
+            !uint8Equal(collectionState.hash, APP_STATE_EMPTY_LT_HASH)
+        const attrs: Record<string, string> = {
+            name: collection
+        }
+        if (hasPersistedState) {
+            attrs.version = String(collectionState.version)
+        } else {
+            attrs.return_snapshot = 'true'
+        }
+
+        const children: BinaryNode[] = []
+        const pendingMutations = pendingByCollection.get(collection) ?? []
+        let outgoingContext: OutgoingPatchContext | undefined
+        let skippedUpload = false
+        if (pendingMutations.length > 0) {
+            if (!hasPersistedState) {
+                skippedUpload = true
+                this.logger.debug('app-state skipped outgoing patch upload until snapshot bootstrap', {
+                    collection,
+                    pendingMutations: pendingMutations.length
+                })
             } else {
-                attrs.return_snapshot = 'true'
+                const outgoing = await this.buildOutgoingPatch(
+                    context,
+                    collection,
+                    collectionState,
+                    pendingMutations
+                )
+                outgoingContext = outgoing.context
+                children.push({
+                    tag: WA_NODE_TAGS.PATCH,
+                    attrs: {},
+                    content: outgoing.encodedPatch
+                })
             }
+        }
 
-            const children: BinaryNode[] = []
-            const pendingMutations = pendingByCollection.get(collection) ?? []
-            if (pendingMutations.length > 0) {
-                if (!hasPersistedState) {
-                    skippedUploadCollections.add(collection)
-                    this.logger.debug(
-                        'app-state skipped outgoing patch upload until snapshot bootstrap',
-                        {
-                            collection,
-                            pendingMutations: pendingMutations.length
-                        }
-                    )
-                } else {
-                    const outgoing = await this.buildOutgoingPatch(
-                        context,
-                        collection,
-                        collectionState,
-                        pendingMutations
-                    )
-                    outgoingContexts.set(collection, outgoing.context)
-                    children.push({
-                        tag: WA_NODE_TAGS.PATCH,
-                        attrs: {},
-                        content: outgoing.encodedPatch
-                    })
-                }
-            }
-
-            collectionNodes.push({
+        return {
+            collection,
+            outgoingContext,
+            skippedUpload,
+            node: {
                 tag: WA_NODE_TAGS.COLLECTION,
                 attrs,
                 content: children.length > 0 ? children : undefined
-            })
+            }
         }
+    }
 
-        const iqNode: BinaryNode = {
+    private buildSyncIqNode(collectionNodes: readonly BinaryNode[]): BinaryNode {
+        return {
             tag: WA_NODE_TAGS.IQ,
             attrs: {
                 to: this.hostDomain,
@@ -288,216 +397,326 @@ export class WaAppStateSyncClient {
                 }
             ]
         }
+    }
 
-        const responseNode = await this.query(iqNode, options.timeoutMs ?? this.defaultTimeoutMs)
+    private async fetchSyncPayloadByCollection(
+        iqNode: BinaryNode,
+        timeoutMs: number
+    ): Promise<Map<AppStateCollectionName, CollectionResponsePayload>> {
+        const responseNode = await this.query(iqNode, timeoutMs)
         this.logger.debug('app-state sync iq response received', {
             tag: responseNode.tag,
             type: responseNode.attrs.type
         })
-        const payloads = this.parseSyncResponse(responseNode)
+        const payloads = parseSyncResponse(responseNode)
         this.logger.debug('app-state sync payloads parsed', { count: payloads.length })
-
         const payloadByCollection = new Map<AppStateCollectionName, CollectionResponsePayload>()
         for (const payload of payloads) {
             payloadByCollection.set(payload.collection, payload)
         }
+        return payloadByCollection
+    }
 
-        const results: WaAppStateCollectionSyncResult[] = []
-        const collectionsToRefetch = new Set<AppStateCollectionName>()
-        let stateChanged = false
+    private async processCollectionRound({
+        context,
+        collection,
+        payloadByCollection,
+        pendingByCollection,
+        options,
+        outgoingContexts,
+        skippedUploadCollections
+    }: {
+        readonly context: WaAppStateSyncContext
+        readonly collection: AppStateCollectionName
+        readonly payloadByCollection: ReadonlyMap<AppStateCollectionName, CollectionResponsePayload>
+        readonly pendingByCollection: ReadonlyMap<
+            AppStateCollectionName,
+            readonly WaAppStateMutationInput[]
+        >
+        readonly options: WaAppStateSyncOptions
+        readonly outgoingContexts: ReadonlyMap<AppStateCollectionName, OutgoingPatchContext>
+        readonly skippedUploadCollections: ReadonlySet<AppStateCollectionName>
+    }): Promise<CollectionSyncOutcome> {
+        const payload = payloadByCollection.get(collection)
+        let shouldRefetch = false
+        let collectionStateChanged = false
 
-        for (const collection of collections) {
-            const payload = payloadByCollection.get(collection)
-            if (!payload) {
-                this.logger.warn('app-state sync response missing collection payload', { collection })
-                results.push({
+        if (!payload) {
+            this.logger.warn('app-state sync response missing collection payload', { collection })
+            return {
+                collection,
+                shouldRefetch,
+                stateChanged: collectionStateChanged,
+                result: {
                     collection,
                     state: WA_APP_STATE_COLLECTION_STATES.ERROR_RETRY
-                })
-                continue
-            }
-
-            if (
-                payload.state === WA_APP_STATE_COLLECTION_STATES.ERROR_FATAL ||
-                payload.state === WA_APP_STATE_COLLECTION_STATES.ERROR_RETRY
-            ) {
-                results.push({
-                    collection,
-                    state: payload.state,
-                    version: payload.version
-                })
-                continue
-            }
-
-            if (payload.state === WA_APP_STATE_COLLECTION_STATES.CONFLICT_HAS_MORE) {
-                collectionsToRefetch.add(collection)
-            } else if (payload.state === WA_APP_STATE_COLLECTION_STATES.CONFLICT) {
-                if ((pendingByCollection.get(collection)?.length ?? 0) > 0) {
-                    collectionsToRefetch.add(collection)
                 }
             }
+        }
 
-            if (payload.state === WA_APP_STATE_COLLECTION_STATES.CONFLICT) {
-                const state =
-                    (pendingByCollection.get(collection)?.length ?? 0) > 0
-                        ? WA_APP_STATE_COLLECTION_STATES.CONFLICT
-                        : WA_APP_STATE_COLLECTION_STATES.SUCCESS
-                results.push({
-                    collection,
-                    state,
-                    version: payload.version
-                })
-                continue
-            }
-
-            if (payload.state === WA_APP_STATE_COLLECTION_STATES.CONFLICT_HAS_MORE) {
-                results.push({
+        if (
+            payload.state === WA_APP_STATE_COLLECTION_STATES.ERROR_FATAL ||
+            payload.state === WA_APP_STATE_COLLECTION_STATES.ERROR_RETRY
+        ) {
+            return {
+                collection,
+                shouldRefetch,
+                stateChanged: collectionStateChanged,
+                result: {
                     collection,
                     state: payload.state,
                     version: payload.version
-                })
-                continue
+                }
+            }
+        }
+
+        const pendingMutationsCount = pendingByCollection.get(collection)?.length ?? 0
+        if (payload.state === WA_APP_STATE_COLLECTION_STATES.CONFLICT_HAS_MORE) {
+            shouldRefetch = true
+        } else if (
+            payload.state === WA_APP_STATE_COLLECTION_STATES.CONFLICT &&
+            pendingMutationsCount > 0
+        ) {
+            shouldRefetch = true
+        }
+
+        if (payload.state === WA_APP_STATE_COLLECTION_STATES.CONFLICT) {
+            return {
+                collection,
+                shouldRefetch,
+                stateChanged: collectionStateChanged,
+                result: {
+                    collection,
+                    state:
+                        pendingMutationsCount > 0
+                            ? WA_APP_STATE_COLLECTION_STATES.CONFLICT
+                            : WA_APP_STATE_COLLECTION_STATES.SUCCESS,
+                    version: payload.version
+                }
+            }
+        }
+
+        if (payload.state === WA_APP_STATE_COLLECTION_STATES.CONFLICT_HAS_MORE) {
+            return {
+                collection,
+                shouldRefetch,
+                stateChanged: collectionStateChanged,
+                result: {
+                    collection,
+                    state: payload.state,
+                    version: payload.version
+                }
+            }
+        }
+
+        try {
+            let appliedMutations: WaAppStateMutation[] = []
+            if (payload.snapshotReference) {
+                const downloader = options.downloadExternalBlob
+                if (!downloader) {
+                    throw new Error(
+                        `snapshot for ${payload.collection} requires external blob downloader`
+                    )
+                }
+                const snapshotBytes = await downloader(
+                    payload.collection,
+                    'snapshot',
+                    payload.snapshotReference
+                )
+                const snapshot = this.validateSnapshot(
+                    payload.collection,
+                    proto.SyncdSnapshot.decode(snapshotBytes)
+                )
+                const snapshotMutations = await this.applySnapshot(
+                    context,
+                    payload.collection,
+                    snapshot
+                )
+                appliedMutations = appliedMutations.concat(snapshotMutations)
+                collectionStateChanged = true
             }
 
-            try {
-                let appliedMutations: WaAppStateMutation[] = []
-                if (payload.snapshotReference) {
-                    const downloader = options.downloadExternalBlob
-                    if (!downloader) {
-                        throw new Error(
-                            `snapshot for ${payload.collection} requires external blob downloader`
-                        )
-                    }
-                    const snapshotBytes = await downloader(
-                        payload.collection,
-                        'snapshot',
-                        payload.snapshotReference
-                    )
-                    const snapshot = this.validateSnapshot(
-                        payload.collection,
-                        proto.SyncdSnapshot.decode(snapshotBytes)
-                    )
-                    const snapshotMutations = await this.applySnapshot(
+            if (payload.patches.length > 0) {
+                const readyPatches = await this.resolveReadyPatches(payload, options)
+                for (const readyPatch of readyPatches) {
+                    const patchMutations = await this.applyPatch(
                         context,
                         payload.collection,
-                        snapshot
+                        readyPatch
                     )
-                    appliedMutations = appliedMutations.concat(snapshotMutations)
-                    stateChanged = true
+                    appliedMutations = appliedMutations.concat(patchMutations)
+                    collectionStateChanged = true
                 }
-
-                if (payload.patches.length > 0) {
-                    const sortedPatches = [...payload.patches].sort((left, right) => {
-                        const leftVersion = longToNumber(
-                            left.version?.version as
-                                | number
-                                | { toNumber(): number }
-                                | null
-                                | undefined
-                        )
-                        const rightVersion = longToNumber(
-                            right.version?.version as
-                                | number
-                                | { toNumber(): number }
-                                | null
-                                | undefined
-                        )
-                        return leftVersion - rightVersion
-                    })
-                    for (const patch of sortedPatches) {
-                        let readyPatch = patch
-                        if (
-                            (!readyPatch.mutations || readyPatch.mutations.length === 0) &&
-                            readyPatch.externalMutations
-                        ) {
-                            const downloader = options.downloadExternalBlob
-                            if (!downloader) {
-                                throw new Error(
-                                    `external patch for ${payload.collection} requires external blob downloader`
-                                )
-                            }
-                            const patchBytes = await downloader(
-                                payload.collection,
-                                'patch',
-                                readyPatch.externalMutations
-                            )
-                            const decodedMutations = proto.SyncdMutations.decode(patchBytes)
-                            readyPatch = {
-                                ...readyPatch,
-                                mutations: decodedMutations.mutations ?? []
-                            }
-                        }
-
-                        const patchMutations = await this.applyPatch(
-                            context,
-                            payload.collection,
-                            this.validatePatch(payload.collection, readyPatch)
-                        )
-                        appliedMutations = appliedMutations.concat(patchMutations)
-                        stateChanged = true
-                    }
-                } else {
-                    const outgoingContext = outgoingContexts.get(payload.collection)
-                    if (
-                        outgoingContext &&
-                        payload.state === WA_APP_STATE_COLLECTION_STATES.SUCCESS &&
-                        payload.version === outgoingContext.patchVersion
-                    ) {
-                        this.setCollectionState(
-                            context,
-                            payload.collection,
-                            outgoingContext.patchVersion,
-                            outgoingContext.nextHash,
-                            outgoingContext.nextIndexValueMap
-                        )
-                        stateChanged = true
-                    }
-                }
-
-                if (payload.state === WA_APP_STATE_COLLECTION_STATES.SUCCESS_HAS_MORE) {
-                    collectionsToRefetch.add(collection)
-                }
+            } else {
+                const outgoingContext = outgoingContexts.get(payload.collection)
                 if (
+                    outgoingContext &&
                     payload.state === WA_APP_STATE_COLLECTION_STATES.SUCCESS &&
-                    skippedUploadCollections.has(collection)
+                    payload.version === outgoingContext.patchVersion
                 ) {
-                    collectionsToRefetch.add(collection)
+                    this.setCollectionState(
+                        context,
+                        payload.collection,
+                        outgoingContext.patchVersion,
+                        outgoingContext.nextHash,
+                        outgoingContext.nextIndexValueMap
+                    )
+                    collectionStateChanged = true
                 }
+            }
 
-                results.push({
+            if (payload.state === WA_APP_STATE_COLLECTION_STATES.SUCCESS_HAS_MORE) {
+                shouldRefetch = true
+            }
+            if (
+                payload.state === WA_APP_STATE_COLLECTION_STATES.SUCCESS &&
+                skippedUploadCollections.has(collection)
+            ) {
+                shouldRefetch = true
+            }
+
+            this.logger.debug('app-state collection processed', {
+                collection: payload.collection,
+                state: payload.state,
+                version: payload.version,
+                appliedMutations: appliedMutations.length
+            })
+            return {
+                collection,
+                shouldRefetch,
+                stateChanged: collectionStateChanged,
+                result: {
                     collection: payload.collection,
                     state: payload.state,
                     version: payload.version,
                     mutations: appliedMutations
-                })
-                this.logger.debug('app-state collection processed', {
+                }
+            }
+        } catch (error) {
+            if (error instanceof WaAppStateMissingKeyError) {
+                this.logger.warn('app-state blocked by missing key', {
                     collection: payload.collection,
-                    state: payload.state,
-                    version: payload.version,
-                    appliedMutations: appliedMutations.length
+                    message: error.message
                 })
-            } catch (error) {
-                if (error instanceof WaAppStateMissingKeyError) {
-                    this.logger.warn('app-state blocked by missing key', {
-                        collection: payload.collection,
-                        message: error.message
-                    })
-                    results.push({
+                return {
+                    collection,
+                    shouldRefetch,
+                    stateChanged: collectionStateChanged,
+                    result: {
                         collection: payload.collection,
                         state: WA_APP_STATE_COLLECTION_STATES.BLOCKED,
                         version: payload.version
-                    })
-                    continue
+                    }
                 }
-                throw error
             }
+            throw error
         }
+    }
 
+    private async resolveReadyPatches(
+        payload: CollectionResponsePayload,
+        options: WaAppStateSyncOptions
+    ): Promise<readonly Proto.ISyncdPatch[]> {
+        const sortedPatches = payload.patches
+            .map((patch) => ({
+                patch,
+                sortVersion: this.parseCollectionPatchVersion(payload.collection, patch)
+            }))
+            .sort((left, right) => left.sortVersion - right.sortVersion)
+            .map((entry) => entry.patch)
+
+        return Promise.all(
+            sortedPatches.map(async (patch) => {
+                let readyPatch = patch
+                if ((!readyPatch.mutations || readyPatch.mutations.length === 0) && readyPatch.externalMutations) {
+                    const downloader = options.downloadExternalBlob
+                    if (!downloader) {
+                        throw new Error(
+                            `external patch for ${payload.collection} requires external blob downloader`
+                        )
+                    }
+                    const patchBytes = await downloader(
+                        payload.collection,
+                        'patch',
+                        readyPatch.externalMutations
+                    )
+                    const decodedMutations = proto.SyncdMutations.decode(patchBytes)
+                    readyPatch = {
+                        ...readyPatch,
+                        mutations: decodedMutations.mutations ?? []
+                    }
+                }
+                return this.validatePatch(payload.collection, readyPatch)
+            })
+        )
+    }
+
+    private toSyncRoundResult(outcomes: readonly CollectionSyncOutcome[]): SyncRoundResult {
         return {
-            results,
-            collectionsToRefetch: [...collectionsToRefetch],
-            stateChanged
+            results: outcomes.map((entry) => entry.result),
+            collectionsToRefetch: outcomes
+                .filter((entry) => entry.shouldRefetch)
+                .map((entry) => entry.collection),
+            stateChanged: outcomes.some((entry) => entry.stateChanged)
         }
+    }
+
+    private validateSnapshot(
+        collection: AppStateCollectionName,
+        snapshot: Proto.ISyncdSnapshot
+    ): Proto.ISyncdSnapshot {
+        if (!snapshot.version?.version) {
+            throw new Error(`snapshot for ${collection} is missing version`)
+        }
+        if (!snapshot.mac) {
+            throw new Error(`snapshot for ${collection} is missing mac`)
+        }
+        if (!snapshot.keyId?.id) {
+            throw new Error(`snapshot for ${collection} is missing keyId`)
+        }
+        return snapshot
+    }
+
+    private parseCollectionPatchVersion(
+        collection: AppStateCollectionName,
+        patch: Proto.ISyncdPatch
+    ): number {
+        const parsed = this.normalizeProtoLong(
+            patch.version?.version,
+            `patch.version.version (${collection})`
+        )
+        if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+            throw new Error(`patch for ${collection} has invalid version ${parsed}`)
+        }
+        return parsed
+    }
+
+    private validatePatch(collection: AppStateCollectionName, patch: Proto.ISyncdPatch): Proto.ISyncdPatch {
+        if (!patch.version?.version) {
+            throw new Error(`patch for ${collection} is missing version`)
+        }
+        if (!patch.snapshotMac) {
+            throw new Error(`patch for ${collection} is missing snapshotMac`)
+        }
+        if (!patch.patchMac) {
+            throw new Error(`patch for ${collection} is missing patchMac`)
+        }
+        if (!patch.keyId?.id) {
+            throw new Error(`patch for ${collection} is missing keyId`)
+        }
+        if (patch.mutations && patch.mutations.length > 0 && patch.externalMutations) {
+            throw new Error(`patch for ${collection} has inline and external mutations together`)
+        }
+        if (
+            patch.exitCode?.code !== null &&
+            patch.exitCode?.code !== undefined &&
+            patch.exitCode.code !== 0
+        ) {
+            throw new Error(
+                `patch for ${collection} has terminal exitCode ${patch.exitCode.code}: ${patch.exitCode.text ?? ''}`
+            )
+        }
+        return patch
     }
 
     private async applySnapshot(
@@ -505,8 +724,9 @@ export class WaAppStateSyncClient {
         collection: AppStateCollectionName,
         snapshot: Proto.ISyncdSnapshot
     ): Promise<WaAppStateMutation[]> {
-        const version = longToNumber(
-            snapshot.version?.version as number | { toNumber(): number } | null | undefined
+        const version = this.normalizeProtoLong(
+            snapshot.version?.version,
+            `snapshot.version.version (${collection})`
         )
         if (!snapshot.mac) {
             throw new Error(`snapshot for ${collection} is missing mac`)
@@ -521,34 +741,8 @@ export class WaAppStateSyncClient {
 
         const indexValueMap = new Map<string, Uint8Array>()
         const mutations: WaAppStateMutation[] = []
-        for (const record of snapshot.records ?? []) {
-            const indexMac = decodeProtoBytes(
-                record.index?.blob,
-                `snapshot.record.index.blob (${collection})`
-            )
-            const valueBlob = decodeProtoBytes(
-                record.value?.blob,
-                `snapshot.record.value.blob (${collection})`
-            )
-            const recordKeyId = decodeProtoBytes(
-                record.keyId?.id,
-                `snapshot.record.keyId.id (${collection})`
-            )
-            const recordKeyData = await this.getKeyData(context, recordKeyId)
-            if (!recordKeyData) {
-                throw new WaAppStateMissingKeyError(
-                    `missing snapshot mutation key ${keyIdToHex(recordKeyId)} for ${collection}`
-                )
-            }
-
-            const decrypted = await this.crypto.decryptMutation({
-                operation: proto.SyncdMutation.SyncdOperation.SET,
-                keyId: recordKeyId,
-                keyData: recordKeyData,
-                indexMac,
-                valueBlob
-            })
-
+        const decryptedRecords = await this.decryptSnapshotRecords(context, collection, snapshot)
+        for (const { decrypted, recordKeyId } of decryptedRecords) {
             const indexMacHex = keyIdToHex(decrypted.indexMac)
             indexValueMap.set(indexMacHex, decrypted.valueMac)
             mutations.push({
@@ -557,20 +751,17 @@ export class WaAppStateSyncClient {
                 index: decrypted.index,
                 value: decrypted.value,
                 version: decrypted.version,
-                indexMac: cloneBytes(decrypted.indexMac),
-                valueMac: cloneBytes(decrypted.valueMac),
-                keyId: cloneBytes(recordKeyId),
-                timestamp: longToNumber(
-                    (decrypted.value as { timestamp?: number | { toNumber(): number } } | null)
-                        ?.timestamp
+                indexMac: decrypted.indexMac,
+                valueMac: decrypted.valueMac,
+                keyId: recordKeyId,
+                timestamp: this.normalizeProtoLong(
+                    decrypted.value?.timestamp,
+                    `snapshot.record.value.timestamp (${collection})`
                 )
             })
         }
 
-        const ltHash = await this.crypto.ltHashAdd(
-            APP_STATE_EMPTY_LT_HASH,
-            Array.from(indexValueMap.values())
-        )
+        const ltHash = await this.crypto.ltHashAdd(APP_STATE_EMPTY_LT_HASH, Array.from(indexValueMap.values()))
         const expectedSnapshotMac = await this.crypto.generateSnapshotMac(
             keyData,
             ltHash,
@@ -580,7 +771,6 @@ export class WaAppStateSyncClient {
         if (!uint8Equal(expectedSnapshotMac, snapshot.mac)) {
             throw new Error(`snapshot MAC mismatch for ${collection}`)
         }
-
         this.setCollectionState(context, collection, version, ltHash, indexValueMap)
         return mutations
     }
@@ -590,8 +780,9 @@ export class WaAppStateSyncClient {
         collection: AppStateCollectionName,
         patch: Proto.ISyncdPatch
     ): Promise<WaAppStateMutation[]> {
-        const patchVersion = longToNumber(
-            patch.version?.version as number | { toNumber(): number } | null | undefined
+        const patchVersion = this.normalizeProtoLong(
+            patch.version?.version,
+            `patch.version.version (${collection})`
         )
         const current = await this.getCollectionState(context, collection)
         if (current.version !== patchVersion - 1) {
@@ -608,61 +799,7 @@ export class WaAppStateSyncClient {
             )
         }
 
-        const decryptedMutations: (WaAppStateMutation & { operationCode: number })[] = []
-        for (const mutation of patch.mutations ?? []) {
-            const operationCode = mutation.operation
-            if (operationCode === null || operationCode === undefined) {
-                throw new Error(`patch mutation is missing operation (${collection})`)
-            }
-            const record = mutation.record
-            if (!record) {
-                throw new Error(`patch mutation is missing record (${collection})`)
-            }
-            const indexMac = decodeProtoBytes(
-                record.index?.blob,
-                `patch.record.index.blob (${collection})`
-            )
-            const valueBlob = decodeProtoBytes(
-                record.value?.blob,
-                `patch.record.value.blob (${collection})`
-            )
-            const recordKeyId = decodeProtoBytes(
-                record.keyId?.id,
-                `patch.record.keyId.id (${collection})`
-            )
-            const recordKeyData = await this.getKeyData(context, recordKeyId)
-            if (!recordKeyData) {
-                throw new WaAppStateMissingKeyError(
-                    `missing mutation key ${keyIdToHex(recordKeyId)} for ${collection}`
-                )
-            }
-
-            const decrypted = await this.crypto.decryptMutation({
-                operation: operationCode,
-                keyId: recordKeyId,
-                keyData: recordKeyData,
-                indexMac,
-                valueBlob
-            })
-
-            decryptedMutations.push({
-                collection,
-                operation:
-                    operationCode === proto.SyncdMutation.SyncdOperation.REMOVE ? 'remove' : 'set',
-                operationCode,
-                index: decrypted.index,
-                value: decrypted.value,
-                version: decrypted.version,
-                indexMac: cloneBytes(decrypted.indexMac),
-                valueMac: cloneBytes(decrypted.valueMac),
-                keyId: cloneBytes(recordKeyId),
-                timestamp: longToNumber(
-                    (decrypted.value as { timestamp?: number | { toNumber(): number } } | null)
-                        ?.timestamp
-                )
-            })
-        }
-
+        const decryptedMutations = await this.decryptPatchMutations(context, collection, patch)
         const nextState = await this.computeNextCollectionState(
             current.hash,
             current.indexValueMap,
@@ -673,30 +810,14 @@ export class WaAppStateSyncClient {
             })),
             collection
         )
-
-        const snapshotMac = decodeProtoBytes(patch.snapshotMac, `patch.snapshotMac (${collection})`)
-        const expectedSnapshotMac = await this.crypto.generateSnapshotMac(
+        await this.assertPatchMacsMatch(
+            patch,
+            collection,
             patchKeyData,
+            patchVersion,
             nextState.hash,
-            patchVersion,
-            collection
+            decryptedMutations
         )
-        if (!uint8Equal(expectedSnapshotMac, snapshotMac)) {
-            throw new Error(`patch snapshot MAC mismatch for ${collection}`)
-        }
-
-        const patchMac = decodeProtoBytes(patch.patchMac, `patch.patchMac (${collection})`)
-        const expectedPatchMac = await this.crypto.generatePatchMac(
-            patchKeyData,
-            snapshotMac,
-            decryptedMutations.map((mutation) => mutation.valueMac),
-            patchVersion,
-            collection
-        )
-        if (!uint8Equal(expectedPatchMac, patchMac)) {
-            throw new Error(`patch MAC mismatch for ${collection}`)
-        }
-
         this.setCollectionState(
             context,
             collection,
@@ -717,6 +838,138 @@ export class WaAppStateSyncClient {
         }))
     }
 
+    private async decryptSnapshotRecords(
+        context: WaAppStateSyncContext,
+        collection: AppStateCollectionName,
+        snapshot: Proto.ISyncdSnapshot
+    ): Promise<readonly DecryptedSnapshotRecord[]> {
+        return Promise.all(
+            (snapshot.records ?? []).map(async (record) => {
+                const indexMac = decodeProtoBytes(
+                    record.index?.blob,
+                    `snapshot.record.index.blob (${collection})`
+                )
+                const valueBlob = decodeProtoBytes(
+                    record.value?.blob,
+                    `snapshot.record.value.blob (${collection})`
+                )
+                const recordKeyId = decodeProtoBytes(
+                    record.keyId?.id,
+                    `snapshot.record.keyId.id (${collection})`
+                )
+                const recordKeyData = await this.getKeyData(context, recordKeyId)
+                if (!recordKeyData) {
+                    throw new WaAppStateMissingKeyError(
+                        `missing snapshot mutation key ${keyIdToHex(recordKeyId)} for ${collection}`
+                    )
+                }
+                const decrypted = await this.crypto.decryptMutation({
+                    operation: proto.SyncdMutation.SyncdOperation.SET,
+                    keyId: recordKeyId,
+                    keyData: recordKeyData,
+                    indexMac,
+                    valueBlob
+                })
+                return {
+                    decrypted,
+                    recordKeyId
+                }
+            })
+        )
+    }
+
+    private async decryptPatchMutations(
+        context: WaAppStateSyncContext,
+        collection: AppStateCollectionName,
+        patch: Proto.ISyncdPatch
+    ): Promise<readonly DecryptedPatchMutation[]> {
+        return Promise.all(
+            (patch.mutations ?? []).map(async (mutation) => {
+                const operationCode = mutation.operation
+                if (operationCode === null || operationCode === undefined) {
+                    throw new Error(`patch mutation is missing operation (${collection})`)
+                }
+                const record = mutation.record
+                if (!record) {
+                    throw new Error(`patch mutation is missing record (${collection})`)
+                }
+                const indexMac = decodeProtoBytes(
+                    record.index?.blob,
+                    `patch.record.index.blob (${collection})`
+                )
+                const valueBlob = decodeProtoBytes(
+                    record.value?.blob,
+                    `patch.record.value.blob (${collection})`
+                )
+                const recordKeyId = decodeProtoBytes(
+                    record.keyId?.id,
+                    `patch.record.keyId.id (${collection})`
+                )
+                const recordKeyData = await this.getKeyData(context, recordKeyId)
+                if (!recordKeyData) {
+                    throw new WaAppStateMissingKeyError(
+                        `missing mutation key ${keyIdToHex(recordKeyId)} for ${collection}`
+                    )
+                }
+                const decrypted = await this.crypto.decryptMutation({
+                    operation: operationCode,
+                    keyId: recordKeyId,
+                    keyData: recordKeyData,
+                    indexMac,
+                    valueBlob
+                })
+                return {
+                    collection,
+                    operation:
+                        operationCode === proto.SyncdMutation.SyncdOperation.REMOVE ? 'remove' : 'set',
+                    operationCode,
+                    index: decrypted.index,
+                    value: decrypted.value,
+                    version: decrypted.version,
+                    indexMac: decrypted.indexMac,
+                    valueMac: decrypted.valueMac,
+                    keyId: recordKeyId,
+                    timestamp: this.normalizeProtoLong(
+                        decrypted.value?.timestamp,
+                        `patch.record.value.timestamp (${collection})`
+                    )
+                }
+            })
+        )
+    }
+
+    private async assertPatchMacsMatch(
+        patch: Proto.ISyncdPatch,
+        collection: AppStateCollectionName,
+        patchKeyData: Uint8Array,
+        patchVersion: number,
+        nextHash: Uint8Array,
+        decryptedMutations: readonly DecryptedPatchMutation[]
+    ): Promise<void> {
+        const snapshotMac = decodeProtoBytes(patch.snapshotMac, `patch.snapshotMac (${collection})`)
+        const expectedSnapshotMac = await this.crypto.generateSnapshotMac(
+            patchKeyData,
+            nextHash,
+            patchVersion,
+            collection
+        )
+        if (!uint8Equal(expectedSnapshotMac, snapshotMac)) {
+            throw new Error(`patch snapshot MAC mismatch for ${collection}`)
+        }
+
+        const patchMac = decodeProtoBytes(patch.patchMac, `patch.patchMac (${collection})`)
+        const expectedPatchMac = await this.crypto.generatePatchMac(
+            patchKeyData,
+            snapshotMac,
+            decryptedMutations.map((mutation) => mutation.valueMac),
+            patchVersion,
+            collection
+        )
+        if (!uint8Equal(expectedPatchMac, patchMac)) {
+            throw new Error(`patch MAC mismatch for ${collection}`)
+        }
+    }
+
     private async buildOutgoingPatch(
         context: WaAppStateSyncContext,
         collection: AppStateCollectionName,
@@ -728,23 +981,27 @@ export class WaAppStateSyncClient {
             throw new WaAppStateMissingKeyError(`no sync key available to upload ${collection}`)
         }
 
-        const encryptedMutations: Proto.ISyncdMutation[] = []
-        const macMutations: MacMutation[] = []
-        for (const mutation of pendingMutations) {
-            const value = mutation.operation === 'set' ? mutation.value : mutation.previousValue
-            const operationCode =
-                mutation.operation === 'remove'
-                    ? proto.SyncdMutation.SyncdOperation.REMOVE
-                    : proto.SyncdMutation.SyncdOperation.SET
-            const encrypted = await this.crypto.encryptMutation({
-                operation: operationCode,
-                keyId: activeKey.keyId,
-                keyData: activeKey.keyData,
-                index: mutation.index,
-                value,
-                version: mutation.version
+        const encryptedResults = await Promise.all(
+            pendingMutations.map(async (mutation) => {
+                const value = mutation.operation === 'set' ? mutation.value : mutation.previousValue
+                const operationCode =
+                    mutation.operation === 'remove'
+                        ? proto.SyncdMutation.SyncdOperation.REMOVE
+                        : proto.SyncdMutation.SyncdOperation.SET
+                const encrypted = await this.crypto.encryptMutation({
+                    operation: operationCode,
+                    keyId: activeKey.keyId,
+                    keyData: activeKey.keyData,
+                    index: mutation.index,
+                    value,
+                    version: mutation.version
+                })
+                return { operationCode, encrypted }
             })
-            encryptedMutations.push({
+        )
+
+        const encryptedMutations: Proto.ISyncdMutation[] = encryptedResults.map(
+            ({ operationCode, encrypted }) => ({
                 operation: operationCode,
                 record: {
                     keyId: { id: activeKey.keyId },
@@ -752,12 +1009,12 @@ export class WaAppStateSyncClient {
                     value: { blob: encrypted.valueBlob }
                 }
             })
-            macMutations.push({
-                operation: operationCode,
-                indexMac: encrypted.indexMac,
-                valueMac: encrypted.valueMac
-            })
-        }
+        )
+        const macMutations: MacMutation[] = encryptedResults.map(({ operationCode, encrypted }) => ({
+            operation: operationCode,
+            indexMac: encrypted.indexMac,
+            valueMac: encrypted.valueMac
+        }))
 
         const nextState = await this.computeNextCollectionState(
             snapshot.hash,
@@ -807,7 +1064,7 @@ export class WaAppStateSyncClient {
     ): Promise<{ readonly hash: Uint8Array; readonly indexValueMap: Map<string, Uint8Array> }> {
         const indexValueMap = new Map<string, Uint8Array>()
         for (const [indexMacHex, valueMac] of baseMap.entries()) {
-            indexValueMap.set(indexMacHex, cloneBytes(valueMac))
+            indexValueMap.set(indexMacHex, valueMac)
         }
 
         const addValues: Uint8Array[] = []
@@ -829,7 +1086,7 @@ export class WaAppStateSyncClient {
             if (existing) {
                 removeValues.push(existing)
             }
-            indexValueMap.set(indexMacHex, cloneBytes(mutation.valueMac))
+            indexValueMap.set(indexMacHex, mutation.valueMac)
             addValues.push(mutation.valueMac)
         }
 
@@ -840,118 +1097,19 @@ export class WaAppStateSyncClient {
         }
     }
 
-    private parseSyncResponse(iqNode: BinaryNode): readonly CollectionResponsePayload[] {
-        if (iqNode.tag !== WA_NODE_TAGS.IQ) {
-            throw new Error(`invalid sync response tag ${iqNode.tag}`)
+    private normalizeProtoLong(value: unknown, field: string): number {
+        if (value === null || value === undefined) {
+            return 0
         }
-        const syncNode = findNodeChild(iqNode, WA_NODE_TAGS.SYNC)
-        if (!syncNode) {
-            throw new Error('sync response is missing <sync> node')
+        if (typeof value !== 'number' && !isProtoLongLike(value)) {
+            throw new Error(`invalid ${field}: expected protobuf Long or number`)
         }
-
-        const payloads: CollectionResponsePayload[] = []
-        for (const collectionNode of getNodeChildrenByTag(syncNode, WA_NODE_TAGS.COLLECTION)) {
-            const collection = parseCollectionName(collectionNode.attrs.name)
-            if (!collection) {
-                throw new Error(`invalid app-state collection name: ${collectionNode.attrs.name}`)
-            }
-            const state = this.parseCollectionState(collectionNode)
-            const versionAttr = collectionNode.attrs.version
-            const version = versionAttr ? Number.parseInt(versionAttr, 10) : undefined
-
-            const patchesNode = findNodeChild(collectionNode, WA_NODE_TAGS.PATCHES)
-            const patches = patchesNode
-                ? getNodeChildrenByTag(patchesNode, WA_NODE_TAGS.PATCH).map((node) =>
-                      proto.SyncdPatch.decode(
-                          decodeBinaryNodeContent(node.content, 'collection.patches.patch')
-                      )
-                  )
-                : []
-
-            const snapshotNode = findNodeChild(collectionNode, WA_NODE_TAGS.SNAPSHOT)
-            const snapshotReference = snapshotNode
-                ? proto.ExternalBlobReference.decode(
-                      decodeBinaryNodeContent(snapshotNode.content, 'collection.snapshot')
-                  )
-                : undefined
-
-            payloads.push({
-                collection,
-                state,
-                version,
-                patches,
-                snapshotReference
-            })
+        try {
+            return longToNumber(value)
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error)
+            throw new Error(`invalid ${field}: ${reason}`)
         }
-        return payloads
-    }
-
-    private parseCollectionState(node: BinaryNode): AppStateCollectionState {
-        const type = node.attrs.type
-        const hasMorePatches = node.attrs.has_more_patches === 'true'
-        if (type !== WA_IQ_TYPES.ERROR) {
-            return hasMorePatches
-                ? WA_APP_STATE_COLLECTION_STATES.SUCCESS_HAS_MORE
-                : WA_APP_STATE_COLLECTION_STATES.SUCCESS
-        }
-
-        const errorNode = findNodeChild(node, WA_NODE_TAGS.ERROR)
-        const code = errorNode?.attrs.code
-        if (code === WA_APP_STATE_ERROR_CODES.CONFLICT) {
-            return hasMorePatches
-                ? WA_APP_STATE_COLLECTION_STATES.CONFLICT_HAS_MORE
-                : WA_APP_STATE_COLLECTION_STATES.CONFLICT
-        }
-        if (
-            code === WA_APP_STATE_ERROR_CODES.BAD_REQUEST ||
-            code === WA_APP_STATE_ERROR_CODES.NOT_FOUND
-        ) {
-            return WA_APP_STATE_COLLECTION_STATES.ERROR_FATAL
-        }
-        return WA_APP_STATE_COLLECTION_STATES.ERROR_RETRY
-    }
-
-    private validateSnapshot(
-        collection: AppStateCollectionName,
-        snapshot: Proto.ISyncdSnapshot
-    ): Proto.ISyncdSnapshot {
-        if (!snapshot.version?.version) {
-            throw new Error(`snapshot for ${collection} is missing version`)
-        }
-        if (!snapshot.mac) {
-            throw new Error(`snapshot for ${collection} is missing mac`)
-        }
-        if (!snapshot.keyId?.id) {
-            throw new Error(`snapshot for ${collection} is missing keyId`)
-        }
-        return snapshot
-    }
-
-    private validatePatch(
-        collection: AppStateCollectionName,
-        patch: Proto.ISyncdPatch
-    ): Proto.ISyncdPatch {
-        if (!patch.version?.version) {
-            throw new Error(`patch for ${collection} is missing version`)
-        }
-        if (!patch.snapshotMac) {
-            throw new Error(`patch for ${collection} is missing snapshotMac`)
-        }
-        if (!patch.patchMac) {
-            throw new Error(`patch for ${collection} is missing patchMac`)
-        }
-        if (!patch.keyId?.id) {
-            throw new Error(`patch for ${collection} is missing keyId`)
-        }
-        if (patch.mutations && patch.mutations.length > 0 && patch.externalMutations) {
-            throw new Error(`patch for ${collection} has inline and external mutations together`)
-        }
-        if (patch.exitCode?.code !== null && patch.exitCode?.code !== undefined) {
-            throw new Error(
-                `patch for ${collection} has terminal exitCode ${patch.exitCode.code}: ${patch.exitCode.text ?? ''}`
-            )
-        }
-        return patch
     }
 
     private groupPendingMutations(
@@ -982,37 +1140,6 @@ export class WaAppStateSyncClient {
             compacted.set(collection, reversed.reverse())
         }
         return compacted
-    }
-
-    private normalizeCollections(
-        collections: readonly AppStateCollectionName[]
-    ): readonly AppStateCollectionName[] {
-        const seen = new Set<AppStateCollectionName>()
-        const normalized: AppStateCollectionName[] = []
-        for (const collection of collections) {
-            if (seen.has(collection)) {
-                continue
-            }
-            seen.add(collection)
-            normalized.push(collection)
-        }
-        return normalized
-    }
-
-    private hasPersistedCollectionState(state: WaAppStateCollectionStoreState): boolean {
-        return (
-            state.version > 0 ||
-            state.indexValueMap.size > 0 ||
-            !uint8Equal(state.hash, APP_STATE_EMPTY_LT_HASH)
-        )
-    }
-
-    private createContext(): WaAppStateSyncContext {
-        return {
-            keys: new Map(),
-            collections: new Map(),
-            dirtyCollections: new Set()
-        }
     }
 
     private async getKeyData(
@@ -1057,17 +1184,37 @@ export class WaAppStateSyncClient {
     }
 
     private async persistCollectionUpdates(context: WaAppStateSyncContext): Promise<void> {
-        for (const collection of context.dirtyCollections.values()) {
-            const state = context.collections.get(collection)
-            if (!state) {
-                continue
-            }
-            await this.store.setCollectionState(
-                collection,
-                state.version,
-                state.hash,
-                state.indexValueMap
-            )
+        const updates = Array.from(context.dirtyCollections.values())
+            .map((collection) => {
+                const state = context.collections.get(collection)
+                if (!state) {
+                    return null
+                }
+                return {
+                    collection,
+                    version: state.version,
+                    hash: state.hash,
+                    indexValueMap: state.indexValueMap
+                }
+            })
+            .filter((entry): entry is WaAppStateCollectionStateUpdate => entry !== null)
+        if (updates.length === 0) {
+            return
         }
+        if (typeof this.store.setCollectionStates === 'function') {
+            await this.store.setCollectionStates(updates)
+            return
+        }
+        await Promise.all(
+            updates.map((update) =>
+                this.store.setCollectionState(
+                    update.collection,
+                    update.version,
+                    update.hash,
+                    update.indexValueMap
+                )
+            )
+        )
     }
 }
+

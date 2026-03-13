@@ -23,5 +23,5 @@ export {
     buildInboundRetryReceiptNode,
     buildInboundRetryReceiptAckNode
 } from '@transport/node/builders/message'
-export { buildRetryAckNode, buildRetryReceiptNode } from '@transport/node/builders/retry'
-export { buildPreKeyUploadIq, intToBigEndianBytes } from '@transport/node/builders/prekeys'
+export { buildRetryReceiptNode } from '@transport/node/builders/retry'
+export { buildPreKeyUploadIq } from '@transport/node/builders/prekeys'

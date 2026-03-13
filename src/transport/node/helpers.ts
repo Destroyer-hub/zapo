@@ -1,5 +1,5 @@
 import type { BinaryNode } from '@transport/types'
-import { TEXT_ENCODER, toBytesView } from '@util/bytes'
+import { base64ToBytes, TEXT_ENCODER } from '@util/bytes'
 
 export function getNodeChildren(node: BinaryNode): readonly BinaryNode[] {
     if (!Array.isArray(node.content)) {
@@ -43,7 +43,10 @@ export function hasNodeChild(node: BinaryNode, tag: string): boolean {
     return findNodeChild(node, tag) !== undefined
 }
 
-export function asNodeBytes(value: BinaryNode['content'], field: string): Uint8Array {
+export function decodeNodeContentUtf8OrBytes(
+    value: BinaryNode['content'],
+    field: string
+): Uint8Array {
     if (value instanceof Uint8Array) {
         return value
     }
@@ -53,12 +56,15 @@ export function asNodeBytes(value: BinaryNode['content'], field: string): Uint8A
     throw new Error(`node ${field} has no binary content`)
 }
 
-export function decodeBinaryNodeContent(value: BinaryNode['content'], field: string): Uint8Array {
+export function decodeNodeContentBase64OrBytes(
+    value: BinaryNode['content'],
+    field: string
+): Uint8Array {
     if (value === null || value === undefined) {
         throw new Error(`missing binary node content for ${field}`)
     }
     if (typeof value === 'string') {
-        return toBytesView(Buffer.from(value, 'base64'))
+        return base64ToBytes(value)
     }
     if (value instanceof Uint8Array) {
         return value

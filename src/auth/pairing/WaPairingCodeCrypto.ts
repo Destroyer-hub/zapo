@@ -1,11 +1,18 @@
-import { webcrypto } from 'node:crypto'
-
 import { CROCKFORD_ALPHABET, PBKDF2_ITERATIONS } from '@auth/pairing/constants'
-import { hkdf, randomBytesAsync } from '@crypto'
+import {
+    type CryptoKey,
+    aesCtrDecrypt,
+    aesCtrEncrypt,
+    aesGcmEncrypt,
+    hkdf,
+    importAesGcmKey,
+    pbkdf2DeriveAesCtrKey,
+    randomBytesAsync
+} from '@crypto'
 import type { SignalKeyPair } from '@crypto/curves/types'
 import { X25519 } from '@crypto/curves/X25519'
 import { WA_PAIRING_KDF_INFO } from '@protocol/constants'
-import { concatBytes, TEXT_ENCODER, toBytesView } from '@util/bytes'
+import { concatBytes, TEXT_ENCODER } from '@util/bytes'
 
 interface CompanionHelloState {
     readonly pairingCode: string
@@ -37,29 +44,8 @@ function bytesToCrockford(bytes: Uint8Array): string {
     return out
 }
 
-async function derivePairingCipher(code: string, salt: Uint8Array): Promise<webcrypto.CryptoKey> {
-    const imported = await webcrypto.subtle.importKey(
-        'raw',
-        TEXT_ENCODER.encode(code),
-        { name: 'PBKDF2' },
-        false,
-        ['deriveKey']
-    )
-    return webcrypto.subtle.deriveKey(
-        {
-            name: 'PBKDF2',
-            hash: 'SHA-256',
-            salt,
-            iterations: PBKDF2_ITERATIONS
-        },
-        imported,
-        {
-            name: 'AES-CTR',
-            length: 256
-        },
-        false,
-        ['encrypt', 'decrypt']
-    )
+async function derivePairingCipher(code: string, salt: Uint8Array): Promise<CryptoKey> {
+    return pbkdf2DeriveAesCtrKey(TEXT_ENCODER.encode(code), salt, PBKDF2_ITERATIONS)
 }
 
 function splitWrappedPrimaryPayload(payload: Uint8Array): {
@@ -84,20 +70,12 @@ export async function createCompanionHello(): Promise<CompanionHelloState> {
     const salt = await randomBytesAsync(32)
     const counter = await randomBytesAsync(16)
     const cipher = await derivePairingCipher(pairingCode, salt)
-    const encrypted = await webcrypto.subtle.encrypt(
-        {
-            name: 'AES-CTR',
-            counter,
-            length: 64
-        },
-        cipher,
-        companionEphemeralKeyPair.pubKey
-    )
+    const encrypted = await aesCtrEncrypt(cipher, counter, companionEphemeralKeyPair.pubKey)
 
     return {
         pairingCode,
         companionEphemeralKeyPair,
-        wrappedCompanionEphemeralPub: concatBytes([salt, counter, toBytesView(encrypted)])
+        wrappedCompanionEphemeralPub: concatBytes([salt, counter, encrypted])
     }
 }
 
@@ -110,17 +88,11 @@ export async function completeCompanionFinish(args: {
 }): Promise<CompanionFinishResult> {
     const wrapped = splitWrappedPrimaryPayload(args.wrappedPrimaryEphemeralPub)
     const pairingCipher = await derivePairingCipher(args.pairingCode, wrapped.salt)
-    const decryptedPrimary = await webcrypto.subtle.decrypt(
-        {
-            name: 'AES-CTR',
-            counter: wrapped.counter,
-            length: 64
-        },
+    const primaryEphemeralPub = await aesCtrDecrypt(
         pairingCipher,
+        wrapped.counter,
         wrapped.ciphertext
     )
-
-    const primaryEphemeralPub = toBytesView(decryptedPrimary)
     if (primaryEphemeralPub.length === 0) {
         throw new Error('empty primary ephemeral public key')
     }
@@ -140,29 +112,16 @@ export async function completeCompanionFinish(args: {
         WA_PAIRING_KDF_INFO.LINK_CODE_BUNDLE,
         32
     )
-    const bundleEncryptionKey = await webcrypto.subtle.importKey(
-        'raw',
-        bundleEncryptionKeyRaw,
-        { name: 'AES-GCM' },
-        false,
-        ['encrypt']
-    )
+    const bundleEncryptionKey = await importAesGcmKey(bundleEncryptionKeyRaw, ['encrypt'])
 
     const plaintextBundle = concatBytes([
         args.registrationIdentityKeyPair.pubKey,
         args.primaryIdentityPub,
         bundleSecret
     ])
-    const encryptedBundle = await webcrypto.subtle.encrypt(
-        {
-            name: 'AES-GCM',
-            iv: bundleIv
-        },
-        bundleEncryptionKey,
-        plaintextBundle
-    )
+    const encryptedBundle = await aesGcmEncrypt(bundleEncryptionKey, bundleIv, plaintextBundle)
 
-    const wrappedKeyBundle = concatBytes([bundleSalt, bundleIv, toBytesView(encryptedBundle)])
+    const wrappedKeyBundle = concatBytes([bundleSalt, bundleIv, encryptedBundle])
 
     const sharedIdentity = await X25519.scalarMult(
         args.registrationIdentityKeyPair.privKey,

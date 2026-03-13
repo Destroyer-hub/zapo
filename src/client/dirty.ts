@@ -23,6 +23,7 @@ import { getNodeChildren } from '@transport/node/helpers'
 import { assertIqResult, parseIqError } from '@transport/node/query'
 import type { BinaryNode } from '@transport/types'
 import { toError } from '@util/primitives'
+import { bytesToHex } from '@util/bytes'
 
 export interface WaDirtyBit {
     readonly type: string
@@ -140,20 +141,24 @@ export async function handleDirtyBits(
         unsupported: unsupported.map((entry) => entry.type).join(',')
     })
 
-    await Promise.all(
-        supported.map(async (dirtyBit) => {
-            try {
-                await handleDirtyBit(runtime, dirtyBit)
-            } catch (error) {
-                runtime.logger.warn('failed handling dirty bit', {
-                    type: dirtyBit.type,
-                    message: toError(error).message
-                })
-            }
-        })
-    )
+    const handledSupported = (
+        await Promise.all(
+            supported.map(async (dirtyBit) => {
+                try {
+                    await handleDirtyBit(runtime, dirtyBit)
+                    return dirtyBit
+                } catch (error) {
+                    runtime.logger.warn('failed handling dirty bit', {
+                        type: dirtyBit.type,
+                        message: toError(error).message
+                    })
+                    return null
+                }
+            })
+        )
+    ).filter((entry): entry is WaDirtyBit => entry !== null)
 
-    await clearDirtyBits(runtime, unsupported.concat(supported))
+    await clearDirtyBits(runtime, unsupported.concat(handledSupported))
 }
 
 async function handleDirtyBit(runtime: WaDirtySyncRuntime, dirtyBit: WaDirtyBit): Promise<void> {
@@ -175,11 +180,13 @@ async function handleAccountSyncDirtyBit(
     runtime.logger.info('received account_sync dirty bit', {
         protocols: selectedProtocols.join(',')
     })
+    const failures: string[] = []
     await Promise.all(
         selectedProtocols.map(async (protocol) => {
             try {
                 await runAccountSyncProtocol(runtime, protocol)
             } catch (error) {
+                failures.push(protocol)
                 runtime.logger.warn('account_sync protocol failed', {
                     protocol,
                     message: toError(error).message
@@ -187,6 +194,9 @@ async function handleAccountSyncDirtyBit(
             }
         })
     )
+    if (failures.length > 0) {
+        throw new Error(`account_sync protocols failed: ${failures.join(',')}`)
+    }
 }
 
 async function runAccountSyncProtocol(
@@ -205,13 +215,7 @@ async function runAccountSyncProtocol(
 
 async function handleSyncdAppStateDirtyBit(runtime: WaDirtySyncRuntime): Promise<void> {
     runtime.logger.info('received syncd_app_state dirty bit, starting sync')
-    try {
-        await runtime.syncAppState()
-    } catch (error) {
-        runtime.logger.warn('app-state sync failed after dirty bit', {
-            message: toError(error).message
-        })
-    }
+    await runtime.syncAppState()
 }
 
 async function syncAccountDevicesDirtyBit(runtime: WaDirtySyncRuntime): Promise<void> {
@@ -308,18 +312,16 @@ async function syncNewsletterMetadataDirtyBit(runtime: WaDirtySyncRuntime): Prom
     runtime.logger.info(
         'newsletter_metadata dirty bit received (GraphQL/MEX sync intentionally disabled)'
     )
-    await runtime
-        .queryWithContext(
-            'dirty.newsletter_metadata',
-            buildNewsletterMetadataSyncIq(),
-            WA_DEFAULTS.IQ_TIMEOUT_MS
-        )
-        .catch(() => undefined)
+    await runtime.queryWithContext(
+        'dirty.newsletter_metadata',
+        buildNewsletterMetadataSyncIq(),
+        WA_DEFAULTS.IQ_TIMEOUT_MS
+    )
 }
 
 async function generateUsyncSid(): Promise<string> {
     const seed = await randomBytesAsync(8)
-    return Buffer.from(seed).toString('hex')
+    return bytesToHex(seed)
 }
 
 function requireCurrentMeJid(runtime: WaDirtySyncRuntime, warnMessage: string): string | null {

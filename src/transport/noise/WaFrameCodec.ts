@@ -1,23 +1,35 @@
 import { concatBytes, EMPTY_BYTES, toBytesView } from '@util/bytes'
 
+const WA_MAX_FRAME_LENGTH = (1 << 24) - 1
+
 function frameLength(header: Uint8Array): number {
     return (header[0] << 16) | (header[1] << 8) | header[2]
 }
 
 export class WaFrameCodec {
     private readonly introFrame: Uint8Array | null
+    private readonly maxFrameLength: number
     private introSent: boolean
     private buffered: Uint8Array
 
-    public constructor(introFrame?: Uint8Array) {
+    public constructor(introFrame?: Uint8Array, maxFrameLength = WA_MAX_FRAME_LENGTH) {
+        if (!Number.isSafeInteger(maxFrameLength) || maxFrameLength <= 0) {
+            throw new Error('maxFrameLength must be a positive safe integer')
+        }
+        if (maxFrameLength >= 1 << 24) {
+            throw new Error('maxFrameLength must be lower than protocol limit (16777216)')
+        }
         this.introFrame = introFrame && introFrame.length > 0 ? toBytesView(introFrame) : null
+        this.maxFrameLength = maxFrameLength
         this.introSent = false
         this.buffered = EMPTY_BYTES
     }
 
     public encodeFrame(frame: Uint8Array): Uint8Array {
-        if (frame.length >= 1 << 24) {
-            throw new Error(`frame is too large: ${frame.length} bytes`)
+        if (frame.length > this.maxFrameLength) {
+            throw new Error(
+                `frame is too large: ${frame.length} bytes (max allowed: ${this.maxFrameLength})`
+            )
         }
         if (!this.introSent && this.introFrame) {
             this.introSent = true
@@ -52,6 +64,11 @@ export class WaFrameCodec {
         while (this.buffered.length - offset >= 3) {
             const header = this.buffered.subarray(offset, offset + 3)
             const length = frameLength(header)
+            if (length > this.maxFrameLength) {
+                throw new Error(
+                    `incoming frame is too large: ${length} bytes (max allowed: ${this.maxFrameLength})`
+                )
+            }
             if (this.buffered.length - offset - 3 < length) {
                 break
             }

@@ -1,12 +1,13 @@
-import { webcrypto } from 'node:crypto'
-
-import { importHmacKey, hmacSign, randomBytesAsync, sha512 } from '@crypto'
-import type { SignalKeyPair } from '@crypto/curves/types'
 import {
-    clampCurvePrivateKey,
-    montgomeryToEdwardsPublic,
-    rawCurvePublicKey
-} from '@crypto/curves/X25519'
+    ed25519VerifyRaw,
+    importHmacKey,
+    hmacSign,
+    randomBytesAsync,
+    sha512,
+    toRawPubKey
+} from '@crypto'
+import type { SignalKeyPair } from '@crypto/curves/types'
+import { clampCurvePrivateKeyInPlace, montgomeryToEdwardsPublic } from '@crypto/curves/X25519'
 import { encodeExtendedPoint, scalarMultBase } from '@crypto/math/edwards'
 import { bytesToBigIntLE, bigIntToBytesLE } from '@crypto/math/le'
 import { modGroup } from '@crypto/math/mod'
@@ -43,17 +44,10 @@ export class WaAdvSignature {
         const signBit = signalSignature[63] & 0x80
         signalSignature[63] &= 0x7f
 
-        const curvePublic = rawCurvePublicKey(publicKey)
+        const curvePublic = toRawPubKey(publicKey)
         const edPublic = montgomeryToEdwardsPublic(curvePublic, signBit)
 
-        const cryptoKey = await webcrypto.subtle.importKey(
-            'raw',
-            edPublic,
-            { name: 'Ed25519' },
-            false,
-            ['verify']
-        )
-        return webcrypto.subtle.verify('Ed25519', cryptoKey, signalSignature, message)
+        return ed25519VerifyRaw(edPublic, signalSignature, message)
     }
 
     static async signSignalMessage(
@@ -64,7 +58,7 @@ export class WaAdvSignature {
             throw new Error(`invalid curve25519 private key length ${privateKey.length}`)
         }
 
-        const clampedPrivateKey = clampCurvePrivateKey(privateKey)
+        const clampedPrivateKey = clampCurvePrivateKeyInPlace(privateKey)
         const privateScalar = bytesToBigIntLE(clampedPrivateKey)
         const encodedPublic = encodeExtendedPoint(scalarMultBase(privateScalar))
         const pubKeySignBit = encodedPublic[31] & 0x80

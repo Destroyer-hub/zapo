@@ -1,8 +1,7 @@
 import type { WaAuthCredentials } from '@auth/types'
 import { proto } from '@proto'
 import type { WaAuthStore } from '@store/contracts/auth.store'
-import { openSqliteConnection, type WaSqliteConnection } from '@store/providers/sqlite/connection'
-import { ensureSqliteMigrations } from '@store/providers/sqlite/migrations'
+import { BaseSqliteStore } from '@store/providers/sqlite/BaseSqliteStore'
 import type { WaSqliteStorageOptions } from '@store/types'
 import {
     asBytes,
@@ -15,19 +14,9 @@ import {
 
 type Row = Record<string, unknown>
 
-export class WaAuthSqliteStore implements WaAuthStore {
-    private readonly options: WaSqliteStorageOptions
-    private connectionPromise: Promise<WaSqliteConnection> | null
-
+export class WaAuthSqliteStore extends BaseSqliteStore implements WaAuthStore {
     public constructor(options: WaSqliteStorageOptions) {
-        if (!options.path || options.path.trim().length === 0) {
-            throw new Error('storage.sqlite.path must be a non-empty string')
-        }
-        if (!options.sessionId || options.sessionId.trim().length === 0) {
-            throw new Error('storage.sqlite.sessionId must be a non-empty string')
-        }
-        this.options = options
-        this.connectionPromise = null
+        super(options, ['auth'])
     }
 
     public async load(): Promise<WaAuthCredentials | null> {
@@ -111,9 +100,7 @@ export class WaAuthSqliteStore implements WaAuthStore {
     }
 
     public async save(credentials: WaAuthCredentials): Promise<void> {
-        const db = await this.getConnection()
-        db.exec('BEGIN')
-        try {
+        await this.withTransaction(async (db) => {
             db.run(
                 `INSERT INTO auth_credentials (
                     session_id,
@@ -203,31 +190,12 @@ export class WaAuthSqliteStore implements WaAuthStore {
                     credentials.accountCreationTs ?? null
                 ]
             )
-            db.exec('COMMIT')
-        } catch (error) {
-            db.exec('ROLLBACK')
-            throw error
-        }
+        })
     }
 
     public async clear(): Promise<void> {
-        const db = await this.getConnection()
-        db.exec('BEGIN')
-        try {
+        await this.withTransaction(async (db) => {
             db.run('DELETE FROM auth_credentials WHERE session_id = ?', [this.options.sessionId])
-            db.exec('COMMIT')
-        } catch (error) {
-            db.exec('ROLLBACK')
-            throw error
-        }
-    }
-
-    private async getConnection(): Promise<WaSqliteConnection> {
-        if (!this.connectionPromise) {
-            this.connectionPromise = openSqliteConnection(this.options).then((connection) => {
-                return ensureSqliteMigrations(connection, ['auth']).then(() => connection)
-            })
-        }
-        return this.connectionPromise
+        })
     }
 }

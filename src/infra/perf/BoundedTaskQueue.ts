@@ -6,6 +6,15 @@ interface QueueItem<T> {
     readonly reject: (error: unknown) => void
 }
 
+export class BoundedTaskQueueFullError extends Error {
+    public readonly code = 'BOUNDED_TASK_QUEUE_FULL'
+
+    public constructor(message = 'queue is full') {
+        super(message)
+        this.name = 'BoundedTaskQueueFullError'
+    }
+}
+
 export class BoundedTaskQueue {
     private readonly maxQueueSize: number
     private readonly maxConcurrency: number
@@ -30,7 +39,7 @@ export class BoundedTaskQueue {
 
     public enqueue<T>(task: Task<T>): Promise<T> {
         if (this.pending() >= this.maxQueueSize) {
-            return Promise.reject(new Error('queue is full'))
+            return Promise.reject(new BoundedTaskQueueFullError())
         }
 
         return new Promise<T>((resolve, reject) => {

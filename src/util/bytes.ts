@@ -1,8 +1,192 @@
 import { timingSafeEqual } from 'node:crypto'
+import type { Readable } from 'node:stream'
 
 export const TEXT_ENCODER = new TextEncoder()
 export const TEXT_DECODER = new TextDecoder()
-export const EMPTY_BYTES = new Uint8Array(0)
+export const EMPTY_BYTES = Object.freeze(new Uint8Array(0))
+
+const HEX_CHARS = '0123456789abcdef'
+
+const HEX_TABLE = /* @__PURE__ */ (() => {
+    const table = new Array<string>(256)
+    for (let i = 0; i < 256; i += 1) {
+        table[i] = HEX_CHARS[i >> 4] + HEX_CHARS[i & 0x0f]
+    }
+    return table
+})()
+
+const HEX_LOOKUP = /* @__PURE__ */ (() => {
+    const table = new Int8Array(128).fill(-1)
+    for (let i = 0x30; i <= 0x39; i += 1) table[i] = i - 0x30
+    for (let i = 0x41; i <= 0x46; i += 1) table[i] = i - 0x41 + 10
+    for (let i = 0x61; i <= 0x66; i += 1) table[i] = i - 0x61 + 10
+    return table
+})()
+
+const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+const BASE64URL_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+
+const BASE64_LOOKUP = /* @__PURE__ */ (() => {
+    const table = new Uint8Array(128).fill(0xff)
+    for (let i = 0; i < BASE64_CHARS.length; i += 1) {
+        table[BASE64_CHARS.charCodeAt(i)] = i
+    }
+    table[0x3d] = 0 // '='
+    return table
+})()
+
+/**
+ * Encodes a Uint8Array to a hex string
+ */
+export function bytesToHex(value: Uint8Array): string {
+    let out = ''
+    for (let i = 0; i < value.length; i += 1) {
+        out += HEX_TABLE[value[i]]
+    }
+    return out
+}
+
+/**
+ * Decodes a hex string to a Uint8Array
+ */
+export function hexToBytes(value: string): Uint8Array {
+    const len = value.length
+    if (len & 1) {
+        throw new Error('hex string must have even length')
+    }
+    const out = new Uint8Array(len >> 1)
+    for (let i = 0; i < len; i += 2) {
+        const hiCode = value.charCodeAt(i)
+        const loCode = value.charCodeAt(i + 1)
+        const hi = hiCode < 128 ? HEX_LOOKUP[hiCode] : -1
+        const lo = loCode < 128 ? HEX_LOOKUP[loCode] : -1
+        if ((hi | lo) < 0) {
+            throw new Error('invalid hex character')
+        }
+        out[i >> 1] = (hi << 4) | lo
+    }
+    return out
+}
+
+/**
+ * Encodes a Uint8Array to a base64 string
+ */
+export function bytesToBase64(value: Uint8Array): string {
+    return encodeBase64(value, BASE64_CHARS, true)
+}
+
+/**
+ * Decodes a base64 string to a Uint8Array
+ */
+export function base64ToBytes(value: string): Uint8Array {
+    const len = value.length
+    if (len === 0) return EMPTY_BYTES
+    if ((len & 3) !== 0) {
+        throw new Error('base64 string length must be multiple of 4')
+    }
+
+    let padding = 0
+    if (value.charCodeAt(len - 1) === 0x3d) padding += 1
+    if (value.charCodeAt(len - 2) === 0x3d) padding += 1
+
+    const outLen = ((len * 3) >> 2) - padding
+    const out = new Uint8Array(outLen)
+    let j = 0
+
+    const mainLen = len - 4
+    let i = 0
+    for (; i < mainLen; i += 4) {
+        const a = lookupBase64(value.charCodeAt(i))
+        const b = lookupBase64(value.charCodeAt(i + 1))
+        const c = lookupBase64(value.charCodeAt(i + 2))
+        const d = lookupBase64(value.charCodeAt(i + 3))
+        out[j++] = (a << 2) | (b >> 4)
+        out[j++] = ((b & 0x0f) << 4) | (c >> 2)
+        out[j++] = ((c & 0x03) << 6) | d
+    }
+
+    if (padding === 0) {
+        const a = lookupBase64(value.charCodeAt(i))
+        const b = lookupBase64(value.charCodeAt(i + 1))
+        const c = lookupBase64(value.charCodeAt(i + 2))
+        const d = lookupBase64(value.charCodeAt(i + 3))
+        out[j++] = (a << 2) | (b >> 4)
+        out[j++] = ((b & 0x0f) << 4) | (c >> 2)
+        out[j++] = ((c & 0x03) << 6) | d
+    } else if (padding === 1) {
+        const a = lookupBase64(value.charCodeAt(i))
+        const b = lookupBase64(value.charCodeAt(i + 1))
+        const c = lookupBase64(value.charCodeAt(i + 2))
+        out[j++] = (a << 2) | (b >> 4)
+        out[j++] = ((b & 0x0f) << 4) | (c >> 2)
+    } else {
+        const a = lookupBase64(value.charCodeAt(i))
+        const b = lookupBase64(value.charCodeAt(i + 1))
+        out[j++] = (a << 2) | (b >> 4)
+    }
+
+    return out
+}
+
+function lookupBase64(code: number): number {
+    if (code > 127) {
+        throw new Error('invalid base64 character')
+    }
+    const v = BASE64_LOOKUP[code]
+    if (v === 0xff) {
+        throw new Error('invalid base64 character')
+    }
+    return v
+}
+
+/**
+ * Encodes a Uint8Array to a base64url string (URL-safe, no padding)
+ */
+export function bytesToBase64UrlSafe(value: Uint8Array): string {
+    return encodeBase64(value, BASE64URL_CHARS, false)
+}
+
+function encodeBase64(value: Uint8Array, alphabet: string, pad: boolean): string {
+    const len = value.length
+    if (len === 0) return ''
+    const remainder = len % 3
+    const mainLen = len - remainder
+    const chunks = Math.ceil(len / 3)
+    const padChars = pad && remainder > 0 ? 3 - remainder : 0
+    const out = new Array<string>(chunks * 4 + padChars)
+    let k = 0
+
+    for (let i = 0; i < mainLen; i += 3) {
+        const a = value[i]
+        const b = value[i + 1]
+        const c = value[i + 2]
+        out[k++] = alphabet[a >> 2]
+        out[k++] = alphabet[((a & 0x03) << 4) | (b >> 4)]
+        out[k++] = alphabet[((b & 0x0f) << 2) | (c >> 6)]
+        out[k++] = alphabet[c & 0x3f]
+    }
+
+    if (remainder === 1) {
+        const a = value[mainLen]
+        out[k++] = alphabet[a >> 2]
+        out[k++] = alphabet[(a & 0x03) << 4]
+        if (pad) {
+            out[k++] = '='
+            out[k++] = '='
+        }
+    } else if (remainder === 2) {
+        const a = value[mainLen]
+        const b = value[mainLen + 1]
+        out[k++] = alphabet[a >> 2]
+        out[k++] = alphabet[((a & 0x03) << 4) | (b >> 4)]
+        out[k++] = alphabet[(b & 0x0f) << 2]
+        if (pad) {
+            out[k++] = '='
+        }
+    }
+
+    return out.join('')
+}
 
 /**
  * Byte array manipulation utilities
@@ -36,30 +220,20 @@ export function toBytesView(value: Uint8Array | ArrayBuffer | ArrayBufferView): 
 }
 
 /**
- * Returns a Buffer view for a Uint8Array without copying when possible
+ * Converts stream/input chunks to Uint8Array with minimal copies
  */
-export function toBufferView(value: Uint8Array): Buffer {
-    if (Buffer.isBuffer(value)) {
-        return value
-    }
-    return Buffer.from(value.buffer, value.byteOffset, value.byteLength)
-}
-
-/**
- * Converts stream/input chunks to Buffer with minimal copies
- */
-export function toBufferChunk(chunk: unknown): Buffer {
-    if (Buffer.isBuffer(chunk)) {
+export function toChunkBytes(chunk: unknown): Uint8Array {
+    if (chunk instanceof Uint8Array) {
         return chunk
     }
-    if (chunk instanceof Uint8Array) {
-        return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
-    }
     if (chunk instanceof ArrayBuffer) {
-        return Buffer.from(chunk)
+        return new Uint8Array(chunk)
     }
     if (typeof chunk === 'string') {
-        return Buffer.from(chunk)
+        return TEXT_ENCODER.encode(chunk)
+    }
+    if (ArrayBuffer.isView(chunk)) {
+        return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
     }
     throw new Error(`unsupported stream chunk type: ${typeof chunk}`)
 }
@@ -71,7 +245,7 @@ export function uint8TimingSafeEqual(left: Uint8Array, right: Uint8Array): boole
     if (left.byteLength !== right.byteLength) {
         return false
     }
-    return timingSafeEqual(toBufferView(left), toBufferView(right))
+    return timingSafeEqual(left, right)
 }
 
 /**
@@ -82,18 +256,18 @@ export function cloneBytes(data: Uint8Array): Uint8Array {
 }
 
 /**
- * Compares two Uint8Array for equality
+ * Constant-time comparison of two Uint8Arrays.
+ * Uses XOR accumulation to avoid timing side-channels on MAC verification.
  */
 export function uint8Equal(a: Uint8Array, b: Uint8Array): boolean {
     if (a.length !== b.length) {
         return false
     }
+    let diff = 0
     for (let i = 0; i < a.length; i += 1) {
-        if (a[i] !== b[i]) {
-            return false
-        }
+        diff |= a[i] ^ b[i]
     }
-    return true
+    return diff === 0
 }
 
 /**
@@ -117,7 +291,55 @@ export function intToBytes(byteLength: number, value: number): Uint8Array {
     let current = value
     for (let i = byteLength - 1; i >= 0; i -= 1) {
         out[i] = current & 0xff
-        current >>= 8
+        current = Math.floor(current / 256)
     }
     return out
+}
+
+export interface ReadAllBytesOptions {
+    readonly maxBytes?: number
+}
+
+function validateMaxBytes(value: number | undefined): number | undefined {
+    if (value === undefined) {
+        return undefined
+    }
+    if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`invalid max bytes limit: ${value}`)
+    }
+    return value
+}
+
+export async function readAllBytes(
+    stream: Readable,
+    options: ReadAllBytesOptions = {}
+): Promise<Uint8Array> {
+    const maxBytes = validateMaxBytes(options.maxBytes)
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for await (const chunk of stream) {
+        const bytes = toChunkBytes(chunk)
+        chunks.push(bytes)
+        total += bytes.byteLength
+        if (maxBytes !== undefined && total > maxBytes) {
+            const error = new Error(`stream exceeded max bytes limit (${maxBytes})`)
+            stream.destroy(error)
+            throw error
+        }
+    }
+
+    if (total === 0) {
+        return EMPTY_BYTES
+    }
+    if (chunks.length === 1) {
+        return chunks[0]
+    }
+
+    const merged = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+        merged.set(chunk, offset)
+        offset += chunk.byteLength
+    }
+    return merged
 }

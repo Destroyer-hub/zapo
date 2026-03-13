@@ -37,8 +37,9 @@ export function longToNumber(value: number | { toNumber(): number } | null | und
     if (value === null || value === undefined) {
         return 0
     }
-    if (typeof value === 'number') {
-        return value
+    const numeric = typeof value === 'number' ? value : value.toNumber()
+    if (!Number.isFinite(numeric) || !Number.isSafeInteger(numeric)) {
+        throw new Error(`invalid long numeric value: ${numeric}`)
     }
-    return value.toNumber()
+    return numeric
 }

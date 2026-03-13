@@ -1,6 +1,6 @@
 import { parseIqError } from '@transport/node/query'
 import type { BinaryNode } from '@transport/types'
-export { buildPreKeyUploadIq, intToBigEndianBytes } from '@transport/node/builders/prekeys'
+export { buildPreKeyUploadIq } from '@transport/node/builders/prekeys'
 
 export function parsePreKeyUploadFailure(node: BinaryNode): {
     readonly errorCode?: number

@@ -10,24 +10,18 @@ import {
     type SqliteCountRow
 } from '@signal/store/sqlite'
 import type { SenderKeyDistributionRecord, SenderKeyRecord, SignalAddress } from '@signal/types'
-import { openSqliteConnection, type WaSqliteConnection } from '@store/providers/sqlite/connection'
-import { ensureSqliteMigrations } from '@store/providers/sqlite/migrations'
+import type { WaSenderKeyStore as WaSenderKeyStoreContract } from '@store/contracts/sender-key.store'
+import { BaseSqliteStore } from '@store/providers/sqlite/BaseSqliteStore'
+import type { WaSqliteConnection } from '@store/providers/sqlite/connection'
 import type { WaSqliteStorageOptions } from '@store/types'
 import { asNumber, asString } from '@util/coercion'
 
-export class SenderKeyStore {
-    private readonly options: WaSqliteStorageOptions
-    private connectionPromise: Promise<WaSqliteConnection> | null
-
+export class SenderKeySqliteStore
+    extends BaseSqliteStore
+    implements WaSenderKeyStoreContract
+{
     public constructor(options: WaSqliteStorageOptions) {
-        if (!options.path || options.path.trim().length === 0) {
-            throw new Error('storage.sqlite.path must be a non-empty string')
-        }
-        if (!options.sessionId || options.sessionId.trim().length === 0) {
-            throw new Error('storage.sqlite.sessionId must be a non-empty string')
-        }
-        this.options = options
-        this.connectionPromise = null
+        super(options, ['senderKey'])
     }
 
     public async upsertSenderKey(record: SenderKeyRecord): Promise<void> {
@@ -182,11 +176,18 @@ export class SenderKeyStore {
         groupId: string,
         participants: readonly SignalAddress[]
     ): Promise<number> {
-        let deleted = 0
-        for (const participant of participants) {
-            deleted += await this.deleteDeviceSenderKey(participant, groupId)
+        if (participants.length === 0) {
+            return 0
         }
-        return deleted
+        return this.withTransaction(async (db) => {
+            let deleted = 0
+            for (const participant of participants) {
+                const sender = toSignalAddressParts(participant)
+                deleted += this.countDelete(db, 'sender_keys', sender, groupId)
+                deleted += this.countDelete(db, 'sender_key_distribution', sender, groupId)
+            }
+            return deleted
+        })
     }
 
     private countDelete(
@@ -223,12 +224,4 @@ export class SenderKeyStore {
         return count
     }
 
-    private async getConnection(): Promise<WaSqliteConnection> {
-        if (!this.connectionPromise) {
-            this.connectionPromise = openSqliteConnection(this.options).then((connection) => {
-                return ensureSqliteMigrations(connection, ['senderKey']).then(() => connection)
-            })
-        }
-        return this.connectionPromise
-    }
 }

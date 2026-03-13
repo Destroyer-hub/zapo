@@ -69,18 +69,16 @@ export function parseSignalAddressFromJid(jid: string): SignalAddress {
 }
 
 export function toUserJid(jid: string): string {
-    const parsed = splitJid(jid)
     const address = parseSignalAddressFromJid(jid)
-    return `${address.user}@${parsed.server}`
+    return `${address.user}@${address.server}`
 }
 
 export function normalizeDeviceJid(jid: string): string {
-    const parsed = splitJid(jid)
     const address = parseSignalAddressFromJid(jid)
     if (address.device === 0) {
-        return `${address.user}@${parsed.server}`
+        return `${address.user}@${address.server}`
     }
-    return `${address.user}:${address.device}@${parsed.server}`
+    return `${address.user}:${address.device}@${address.server}`
 }
 
 export function getLoginIdentity(meJid: string): {

@@ -201,11 +201,23 @@ function decodeSignalMessageKey(
     messageKey: Proto.SessionStructure.Chain.IMessageKey,
     field: string
 ): SignalMessageKey {
+    const cipherKey = asBytes(messageKey.cipherKey, `${field}.cipherKey`)
+    if (cipherKey.byteLength !== 32) {
+        throw new Error(`invalid ${field}.cipherKey length ${cipherKey.byteLength}`)
+    }
+    const macKey = asBytes(messageKey.macKey, `${field}.macKey`)
+    if (macKey.byteLength !== 32) {
+        throw new Error(`invalid ${field}.macKey length ${macKey.byteLength}`)
+    }
+    const iv = asBytes(messageKey.iv, `${field}.iv`)
+    if (iv.byteLength !== 16) {
+        throw new Error(`invalid ${field}.iv length ${iv.byteLength}`)
+    }
     return {
         index: asNumber(messageKey.index, `${field}.index`),
-        cipherKey: asBytes(messageKey.cipherKey, `${field}.cipherKey`),
-        macKey: asBytes(messageKey.macKey, `${field}.macKey`),
-        iv: asBytes(messageKey.iv, `${field}.iv`)
+        cipherKey,
+        macKey,
+        iv
     }
 }
 
@@ -217,10 +229,18 @@ function decodeSignalRecvChain(
     if (!chainKey) {
         throw new Error(`missing ${field}.chainKey`)
     }
+    const ratchetPubKey = asBytes(chain.senderRatchetKey, `${field}.senderRatchetKey`)
+    if (ratchetPubKey.byteLength !== 33) {
+        throw new Error(`invalid ${field}.senderRatchetKey length ${ratchetPubKey.byteLength}`)
+    }
+    const chainKeyBytes = asBytes(chainKey.key, `${field}.chainKey.key`)
+    if (chainKeyBytes.byteLength !== 32) {
+        throw new Error(`invalid ${field}.chainKey.key length ${chainKeyBytes.byteLength}`)
+    }
     return {
-        ratchetPubKey: asBytes(chain.senderRatchetKey, `${field}.senderRatchetKey`),
+        ratchetPubKey,
         nextMsgIndex: asNumber(chainKey.index, `${field}.chainKey.index`),
-        chainKey: asBytes(chainKey.key, `${field}.chainKey.key`),
+        chainKey: chainKeyBytes,
         unusedMsgKeys: (chain.messageKeys ?? []).map((messageKey, index) =>
             decodeSignalMessageKey(messageKey, `${field}.messageKeys[${index}]`)
         )
@@ -242,13 +262,24 @@ function decodeSignalSendChain(
     if (!privateKey) {
         throw new Error(`missing ${field}.senderRatchetKeyPrivate`)
     }
+    if (privateKey.byteLength !== 32) {
+        throw new Error(`invalid ${field}.senderRatchetKeyPrivate length ${privateKey.byteLength}`)
+    }
+    const ratchetPubKey = asBytes(chain.senderRatchetKey, `${field}.senderRatchetKey`)
+    if (ratchetPubKey.byteLength !== 33) {
+        throw new Error(`invalid ${field}.senderRatchetKey length ${ratchetPubKey.byteLength}`)
+    }
+    const chainKeyBytes = asBytes(chainKey.key, `${field}.chainKey.key`)
+    if (chainKeyBytes.byteLength !== 32) {
+        throw new Error(`invalid ${field}.chainKey.key length ${chainKeyBytes.byteLength}`)
+    }
     return {
         ratchetKey: {
-            pubKey: asBytes(chain.senderRatchetKey, `${field}.senderRatchetKey`),
+            pubKey: ratchetPubKey,
             privKey: privateKey
         },
         nextMsgIndex: asNumber(chainKey.index, `${field}.chainKey.index`),
-        chainKey: asBytes(chainKey.key, `${field}.chainKey.key`)
+        chainKey: chainKeyBytes
     }
 }
 
@@ -261,16 +292,40 @@ function decodeSignalSessionSnapshot(
         throw new Error(`missing ${field}.senderChain`)
     }
     const pendingPreKey = session.pendingPreKey
+    const localPubKey = asBytes(session.localIdentityPublic, `${field}.localIdentityPublic`)
+    if (localPubKey.byteLength !== 33) {
+        throw new Error(`invalid ${field}.localIdentityPublic length ${localPubKey.byteLength}`)
+    }
+    const remotePubKey = asBytes(session.remoteIdentityPublic, `${field}.remoteIdentityPublic`)
+    if (remotePubKey.byteLength !== 33) {
+        throw new Error(`invalid ${field}.remoteIdentityPublic length ${remotePubKey.byteLength}`)
+    }
+    const rootKey = asBytes(session.rootKey, `${field}.rootKey`)
+    if (rootKey.byteLength !== 32) {
+        throw new Error(`invalid ${field}.rootKey length ${rootKey.byteLength}`)
+    }
+    const localOneTimePubKey = pendingPreKey
+        ? asBytes(pendingPreKey.baseKey, `${field}.pendingPreKey.baseKey`)
+        : null
+    if (localOneTimePubKey && localOneTimePubKey.byteLength !== 33) {
+        throw new Error(
+            `invalid ${field}.pendingPreKey.baseKey length ${localOneTimePubKey.byteLength}`
+        )
+    }
+    const aliceBaseKey = asOptionalBytes(session.aliceBaseKey, `${field}.aliceBaseKey`) ?? null
+    if (aliceBaseKey && aliceBaseKey.byteLength !== 33) {
+        throw new Error(`invalid ${field}.aliceBaseKey length ${aliceBaseKey.byteLength}`)
+    }
     return {
         local: {
             regId: asNumber(session.localRegistrationId, `${field}.localRegistrationId`),
-            pubKey: asBytes(session.localIdentityPublic, `${field}.localIdentityPublic`)
+            pubKey: localPubKey
         },
         remote: {
             regId: asNumber(session.remoteRegistrationId, `${field}.remoteRegistrationId`),
-            pubKey: asBytes(session.remoteIdentityPublic, `${field}.remoteIdentityPublic`)
+            pubKey: remotePubKey
         },
-        rootKey: asBytes(session.rootKey, `${field}.rootKey`),
+        rootKey,
         sendChain: decodeSignalSendChain(senderChain, `${field}.senderChain`),
         recvChains: (session.receiverChains ?? []).map((chain, index) =>
             decodeSignalRecvChain(chain, `${field}.receiverChains[${index}]`)
@@ -284,15 +339,12 @@ function decodeSignalSessionSnapshot(
                       pendingPreKey.signedPreKeyId,
                       `${field}.pendingPreKey.signedPreKeyId`
                   ),
-                  localOneTimePubKey: asBytes(
-                      pendingPreKey.baseKey,
-                      `${field}.pendingPreKey.baseKey`
-                  )
+                  localOneTimePubKey: localOneTimePubKey!
               }
             : null,
         prevSendChainHighestIndex:
             asOptionalNumber(session.previousCounter, `${field}.previousCounter`) ?? 0,
-        aliceBaseKey: asOptionalBytes(session.aliceBaseKey, `${field}.aliceBaseKey`) ?? null
+        aliceBaseKey
     }
 }
 

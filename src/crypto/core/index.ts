@@ -10,12 +10,12 @@ export {
     toSerializedPubKey,
     toRawPubKey,
     prependVersion,
-    readVersionedContent,
-    versionByte
+    readVersionedContent
 } from '@crypto/core/keys'
 export { buildNonce } from '@crypto/core/nonce'
 export { randomBytesAsync, randomIntAsync } from '@crypto/core/random'
 export {
+    type CryptoKey,
     sha256,
     sha512,
     importAesGcmKey,
@@ -27,5 +27,9 @@ export {
     importHmacKey,
     importHmacSha512Key,
     hmacSign,
-    hkdfSplit64
+    hkdfSplit64,
+    pbkdf2DeriveAesCtrKey,
+    aesCtrEncrypt,
+    aesCtrDecrypt,
+    ed25519VerifyRaw
 } from '@crypto/core/primitives'

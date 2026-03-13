@@ -101,10 +101,6 @@ export class WaAuthClient {
         }
     }
 
-    public getCredentials(): WaAuthCredentials | null {
-        return this.credentials
-    }
-
     public getCurrentCredentials(): WaAuthCredentials | null {
         return this.credentials
     }

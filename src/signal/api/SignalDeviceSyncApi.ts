@@ -1,3 +1,5 @@
+import { randomInt } from 'node:crypto'
+
 import type { Logger } from '@infra/log/types'
 import { WA_DEFAULTS, WA_NODE_TAGS, WA_XMLNS } from '@protocol/constants'
 import { parseSignalAddressFromJid, splitJid } from '@protocol/jid'
@@ -183,6 +185,6 @@ export class SignalDeviceSyncApi {
     }
 
     private makeSid(): string {
-        return `${Date.now()}.${Math.trunc(Math.random() * 1_000_000)}`
+        return `${Date.now()}.${randomInt(1_000_000)}`
     }
 }

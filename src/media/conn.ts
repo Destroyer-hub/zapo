@@ -1,11 +1,8 @@
 import type { WaMediaConn } from '@media/types'
 import { WA_NODE_TAGS } from '@protocol/constants'
-import { buildMediaConnIq } from '@transport/node/builders/media'
 import { findNodeChild, getNodeChildrenByTag } from '@transport/node/helpers'
 import { assertIqResult } from '@transport/node/query'
 import type { BinaryNode } from '@transport/types'
-
-export { buildMediaConnIq }
 
 export function parseMediaConnResponse(node: BinaryNode, nowMs: number): WaMediaConn {
     assertIqResult(node, 'media_conn')

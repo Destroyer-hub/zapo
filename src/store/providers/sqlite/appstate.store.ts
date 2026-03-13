@@ -13,13 +13,13 @@ import type {
     WaAppStateSyncKey,
     WaAppStateStoreData
 } from '@appstate/types'
-import { keyDeviceId, keyEpoch } from '@appstate/utils'
+import { keyEpoch, pickActiveSyncKey } from '@appstate/utils'
 import type {
+    WaAppStateCollectionStateUpdate,
     WaAppStateCollectionStoreState,
     WaAppStateStore
 } from '@store/contracts/appstate.store'
-import { openSqliteConnection, type WaSqliteConnection } from '@store/providers/sqlite/connection'
-import { ensureSqliteMigrations } from '@store/providers/sqlite/migrations'
+import { BaseSqliteStore } from '@store/providers/sqlite/BaseSqliteStore'
 import type { WaSqliteStorageOptions } from '@store/types'
 import { uint8Equal } from '@util/bytes'
 import { asBytes, asNumber, asString } from '@util/coercion'
@@ -28,19 +28,9 @@ interface KeyDataRow extends Record<string, unknown> {
     readonly key_data: unknown
 }
 
-export class WaAppStateSqliteStore implements WaAppStateStore {
-    private readonly options: WaSqliteStorageOptions
-    private connectionPromise: Promise<WaSqliteConnection> | null
-
+export class WaAppStateSqliteStore extends BaseSqliteStore implements WaAppStateStore {
     public constructor(options: WaSqliteStorageOptions) {
-        if (!options.path || options.path.trim().length === 0) {
-            throw new Error('storage.sqlite.path must be a non-empty string')
-        }
-        if (!options.sessionId || options.sessionId.trim().length === 0) {
-            throw new Error('storage.sqlite.sessionId must be a non-empty string')
-        }
-        this.options = options
-        this.connectionPromise = null
+        super(options, ['appState'])
     }
 
     public async exportData(): Promise<WaAppStateStoreData> {
@@ -148,7 +138,7 @@ export class WaAppStateSqliteStore implements WaAppStateStore {
              WHERE session_id = ?`,
             [this.options.sessionId]
         )
-        let active: WaAppStateSyncKey | null = null
+        const keys: WaAppStateSyncKey[] = []
         for (const row of rows) {
             const key = {
                 keyId: asBytes(row.key_id, 'appstate_sync_keys.key_id'),
@@ -156,24 +146,9 @@ export class WaAppStateSqliteStore implements WaAppStateStore {
                 timestamp: asNumber(row.timestamp, 'appstate_sync_keys.timestamp'),
                 fingerprint: decodeAppStateFingerprint(row.fingerprint)
             }
-            if (!active) {
-                active = key
-                continue
-            }
-            const currentEpoch = keyEpoch(active.keyId)
-            const nextEpoch = keyEpoch(key.keyId)
-            if (nextEpoch > currentEpoch) {
-                active = key
-                continue
-            }
-            if (nextEpoch < currentEpoch) {
-                continue
-            }
-            if (keyDeviceId(key.keyId) < keyDeviceId(active.keyId)) {
-                active = key
-            }
+            keys.push(key)
         }
-        return active
+        return pickActiveSyncKey(keys)
     }
 
     public async getCollectionState(
@@ -222,37 +197,55 @@ export class WaAppStateSqliteStore implements WaAppStateStore {
         hash: Uint8Array,
         indexValueMap: ReadonlyMap<string, Uint8Array>
     ): Promise<void> {
+        await this.setCollectionStates([
+            {
+                collection,
+                version,
+                hash,
+                indexValueMap
+            }
+        ])
+    }
+
+    public async setCollectionStates(
+        updates: readonly WaAppStateCollectionStateUpdate[]
+    ): Promise<void> {
+        if (updates.length === 0) {
+            return
+        }
         const db = await this.getConnection()
         db.exec('BEGIN')
         try {
-            db.run(
-                `INSERT INTO appstate_collection_versions (
-                    session_id,
-                    collection,
-                    version,
-                    hash
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(session_id, collection) DO UPDATE SET
-                    version=excluded.version,
-                    hash=excluded.hash`,
-                [this.options.sessionId, collection, version, hash]
-            )
-
-            db.run(
-                `DELETE FROM appstate_collection_index_values
-                 WHERE session_id = ? AND collection = ?`,
-                [this.options.sessionId, collection]
-            )
-            for (const [indexMacHex, valueMac] of indexValueMap.entries()) {
+            for (const update of updates) {
                 db.run(
-                    `INSERT INTO appstate_collection_index_values (
+                    `INSERT INTO appstate_collection_versions (
                         session_id,
                         collection,
-                        index_mac_hex,
-                        value_mac
-                    ) VALUES (?, ?, ?, ?)`,
-                    [this.options.sessionId, collection, indexMacHex, valueMac]
+                        version,
+                        hash
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(session_id, collection) DO UPDATE SET
+                        version=excluded.version,
+                        hash=excluded.hash`,
+                    [this.options.sessionId, update.collection, update.version, update.hash]
                 )
+
+                db.run(
+                    `DELETE FROM appstate_collection_index_values
+                     WHERE session_id = ? AND collection = ?`,
+                    [this.options.sessionId, update.collection]
+                )
+                for (const [indexMacHex, valueMac] of update.indexValueMap.entries()) {
+                    db.run(
+                        `INSERT INTO appstate_collection_index_values (
+                            session_id,
+                            collection,
+                            index_mac_hex,
+                            value_mac
+                        ) VALUES (?, ?, ?, ?)`,
+                        [this.options.sessionId, update.collection, indexMacHex, valueMac]
+                    )
+                }
             }
             db.exec('COMMIT')
         } catch (error) {
@@ -279,12 +272,4 @@ export class WaAppStateSqliteStore implements WaAppStateStore {
         }
     }
 
-    private async getConnection(): Promise<WaSqliteConnection> {
-        if (!this.connectionPromise) {
-            this.connectionPromise = openSqliteConnection(this.options).then((connection) => {
-                return ensureSqliteMigrations(connection, ['appState']).then(() => connection)
-            })
-        }
-        return this.connectionPromise
-    }
 }

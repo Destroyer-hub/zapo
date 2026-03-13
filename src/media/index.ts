@@ -1,5 +1,5 @@
 export { WaMediaTransferClient } from '@media/WaMediaTransferClient'
-export { buildMediaConnIq, parseMediaConnResponse } from '@media/conn'
+export { parseMediaConnResponse } from '@media/conn'
 export type {
     WaMediaConn,
     WaMediaConnHost,

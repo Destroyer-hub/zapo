@@ -10,7 +10,7 @@ import type { SignalPreKeyBundle } from '@signal/types'
 import {
     findNodeChild,
     getNodeChildrenByTag,
-    decodeBinaryNodeContent
+    decodeNodeContentBase64OrBytes
 } from '@transport/node/helpers'
 import type { BinaryNode } from '@transport/types'
 
@@ -160,7 +160,7 @@ export class SignalSessionSyncApi {
             throw new Error('key bundle user missing signed pre-key node')
         }
 
-        const registrationBytes = decodeBinaryNodeContent(
+        const registrationBytes = decodeNodeContentBase64OrBytes(
             registrationNode.content,
             'key bundle registration'
         )
@@ -175,7 +175,7 @@ export class SignalSessionSyncApi {
             registrationBytes.byteLength
         ).getUint32(0, false)
 
-        const identity = decodeBinaryNodeContent(identityNode.content, 'key bundle identity')
+        const identity = decodeNodeContentBase64OrBytes(identityNode.content, 'key bundle identity')
         this.assertLength(identity, SIGNAL_KEY_DATA_LENGTH, 'key bundle identity')
 
         const signedIdNode = findNodeChild(signedPreKeyNode, WA_NODE_TAGS.ID)
@@ -185,14 +185,14 @@ export class SignalSessionSyncApi {
             throw new Error('key bundle signed pre-key is incomplete')
         }
 
-        const signedIdBytes = decodeBinaryNodeContent(signedIdNode.content, 'key bundle skey.id')
+        const signedIdBytes = decodeNodeContentBase64OrBytes(signedIdNode.content, 'key bundle skey.id')
         this.assertLength(signedIdBytes, SIGNAL_KEY_ID_LENGTH, 'key bundle skey.id')
-        const signedValue = decodeBinaryNodeContent(
+        const signedValue = decodeNodeContentBase64OrBytes(
             signedValueNode.content,
             'key bundle skey.value'
         )
         this.assertLength(signedValue, SIGNAL_KEY_DATA_LENGTH, 'key bundle skey.value')
-        const signedSignature = decodeBinaryNodeContent(
+        const signedSignature = decodeNodeContentBase64OrBytes(
             signedSignatureNode.content,
             'key bundle skey.signature'
         )
@@ -206,9 +206,9 @@ export class SignalSessionSyncApi {
             if (!preKeyIdNode || !preKeyValueNode) {
                 throw new Error('key bundle one-time pre-key is incomplete')
             }
-            const preKeyIdBytes = decodeBinaryNodeContent(preKeyIdNode.content, 'key bundle key.id')
+            const preKeyIdBytes = decodeNodeContentBase64OrBytes(preKeyIdNode.content, 'key bundle key.id')
             this.assertLength(preKeyIdBytes, SIGNAL_KEY_ID_LENGTH, 'key bundle key.id')
-            const preKeyValue = decodeBinaryNodeContent(
+            const preKeyValue = decodeNodeContentBase64OrBytes(
                 preKeyValueNode.content,
                 'key bundle key.value'
             )
@@ -222,7 +222,7 @@ export class SignalSessionSyncApi {
 
         const deviceIdentityNode = findNodeChild(node, WA_NODE_TAGS.DEVICE_IDENTITY)
         const deviceIdentity = deviceIdentityNode
-            ? decodeBinaryNodeContent(deviceIdentityNode.content, 'key bundle device-identity')
+            ? decodeNodeContentBase64OrBytes(deviceIdentityNode.content, 'key bundle device-identity')
             : undefined
 
         return {
@@ -260,3 +260,4 @@ export class SignalSessionSyncApi {
         return `key bundle iq error (${code} ${text})`
     }
 }
+

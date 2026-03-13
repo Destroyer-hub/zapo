@@ -1,15 +1,9 @@
-import { toBufferView, toBytesView } from '@util/bytes'
+import { base64ToBytes as decodeBase64, bytesToBase64, bytesToBase64UrlSafe } from '@util/bytes'
 
-export function bytesToBase64(value: Uint8Array): string {
-    return toBufferView(value).toString('base64')
-}
-
-export function bytesToBase64UrlSafe(value: Uint8Array): string {
-    return bytesToBase64(value).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
-}
+export { bytesToBase64, bytesToBase64UrlSafe }
 
 export function base64ToBytes(value: string, field: string, requireNonEmpty = true): Uint8Array {
-    const out = toBytesView(Buffer.from(value, 'base64'))
+    const out = decodeBase64(value)
     if (requireNonEmpty && out.length === 0) {
         throw new Error(`invalid base64 payload for ${field}`)
     }
@@ -26,5 +20,5 @@ export function decodeProtoBytes(
     if (value instanceof Uint8Array) {
         return value
     }
-    return toBytesView(Buffer.from(value, 'base64'))
+    return decodeBase64(value)
 }

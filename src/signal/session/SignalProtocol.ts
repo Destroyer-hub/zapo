@@ -1,4 +1,6 @@
 import { toSerializedPubKey } from '@crypto'
+import { ConsoleLogger } from '@infra/log/ConsoleLogger'
+import type { Logger } from '@infra/log/types'
 import { MAX_PREV_SESSIONS } from '@signal/constants'
 import {
     decryptMsg,
@@ -47,9 +49,11 @@ interface SignalMessageEnvelope {
 
 export class SignalProtocol {
     private readonly store: WaSignalStore
+    private readonly logger: Logger
 
-    public constructor(store: WaSignalStore) {
+    public constructor(store: WaSignalStore, logger: Logger = new ConsoleLogger('info')) {
         this.store = store
+        this.logger = logger
     }
 
     public async hasSession(address: SignalAddress): Promise<boolean> {
@@ -93,7 +97,9 @@ export class SignalProtocol {
 
         const [updatedSession, encrypted] = await encryptMsg(session, plaintext)
         await this.store.setSession(address, updatedSession)
-        await this.store.setRemoteIdentity(address, updatedSession.remote.pubKey)
+        if (!uint8Equal(updatedSession.remote.pubKey, session.remote.pubKey)) {
+            await this.store.setRemoteIdentity(address, updatedSession.remote.pubKey)
+        }
         return {
             ...encrypted,
             baseKey: updatedSession.aliceBaseKey
@@ -117,10 +123,10 @@ export class SignalProtocol {
             throw new Error(`unsupported ciphertext type ${envelope.type}`)
         }
 
-        if (outcome.newSessionInfo?.newIdentity) {
-            await this.store.setRemoteIdentity(address, outcome.newSessionInfo.newIdentity)
-        } else {
-            await this.store.setRemoteIdentity(address, outcome.updatedSession.remote.pubKey)
+        const nextRemoteIdentity =
+            outcome.newSessionInfo?.newIdentity ?? outcome.updatedSession.remote.pubKey
+        if (!currentSession || !uint8Equal(currentSession.remote.pubKey, nextRemoteIdentity)) {
+            await this.store.setRemoteIdentity(address, nextRemoteIdentity)
         }
         await this.store.setSession(address, outcome.updatedSession)
         return outcome.plaintext
@@ -130,8 +136,16 @@ export class SignalProtocol {
         session: SignalSessionRecord | null,
         parsed: ParsedSignalMessage
     ): Promise<DecryptOutcome> {
-        return decryptMsg(session, parsed, (sess, msg) =>
-            decryptMsgFromSession(sess, msg, () => generateSerializedKeyPair())
+        return decryptMsg(
+            session,
+            parsed,
+            (sess, msg) => decryptMsgFromSession(sess, msg, () => generateSerializedKeyPair()),
+            (error, previousSessionIndex) => {
+                this.logger.debug('signal decrypt fallback session failed', {
+                    previousSessionIndex,
+                    message: error.message
+                })
+            }
         )
     }
 
@@ -175,13 +189,12 @@ export class SignalProtocol {
             !currentSession || !uint8Equal(incoming.remote.pubKey, currentSession.remote.pubKey)
                 ? incoming.remote.pubKey
                 : null
-        const baseSession =
-            currentSession && (newIdentity === null || newIdentity === undefined)
-                ? setPrevSessions(incoming, [
-                      detachSession(currentSession),
-                      ...currentSession.prevSessions.slice(0, MAX_PREV_SESSIONS - 1)
-                  ])
-                : incoming
+        const baseSession = currentSession
+            ? setPrevSessions(incoming, [
+                  detachSession(currentSession),
+                  ...currentSession.prevSessions.slice(0, MAX_PREV_SESSIONS - 1)
+              ])
+            : incoming
 
         const [updatedSession, plaintext] = await decryptMsgFromSession(baseSession, parsed, () =>
             generateSerializedKeyPair()

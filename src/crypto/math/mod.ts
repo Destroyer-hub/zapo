@@ -17,7 +17,7 @@ export function modInv(value: bigint, modulus = FIELD_P): bigint {
     return modPow(value, modulus - 2n, modulus)
 }
 
-export function modPow(base: bigint, exponent: bigint, modulus: bigint): bigint {
+function modPow(base: bigint, exponent: bigint, modulus: bigint): bigint {
     if (modulus <= 0n) {
         throw new Error('modulus must be positive')
     }

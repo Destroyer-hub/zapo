@@ -10,6 +10,13 @@ export interface WaAppStateCollectionStoreState {
     readonly indexValueMap: ReadonlyMap<string, Uint8Array>
 }
 
+export interface WaAppStateCollectionStateUpdate {
+    readonly collection: AppStateCollectionName
+    readonly version: number
+    readonly hash: Uint8Array
+    readonly indexValueMap: ReadonlyMap<string, Uint8Array>
+}
+
 export interface WaAppStateStore {
     exportData(): Promise<WaAppStateStoreData>
     upsertSyncKeys(keys: readonly WaAppStateSyncKey[]): Promise<number>
@@ -22,5 +29,6 @@ export interface WaAppStateStore {
         hash: Uint8Array,
         indexValueMap: ReadonlyMap<string, Uint8Array>
     ): Promise<void>
+    setCollectionStates?(updates: readonly WaAppStateCollectionStateUpdate[]): Promise<void>
     clear(): Promise<void>
 }

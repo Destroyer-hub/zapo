@@ -3,8 +3,8 @@ import type {
     WaRetryOutboundState
 } from '@retry/types'
 import type { WaRetryStore } from '@store/contracts/retry.store'
-import { openSqliteConnection, type WaSqliteConnection } from '@store/providers/sqlite/connection'
-import { ensureSqliteMigrations } from '@store/providers/sqlite/migrations'
+import { BaseSqliteStore } from '@store/providers/sqlite/BaseSqliteStore'
+import type { WaSqliteConnection } from '@store/providers/sqlite/connection'
 import type { WaSqliteStorageOptions } from '@store/types'
 import { asBytes, asNumber, asOptionalString, asString } from '@util/coercion'
 
@@ -30,19 +30,9 @@ interface CountRow extends Record<string, unknown> {
     readonly total: unknown
 }
 
-export class WaRetrySqliteStore implements WaRetryStore {
-    private readonly options: WaSqliteStorageOptions
-    private connectionPromise: Promise<WaSqliteConnection> | null
-
+export class WaRetrySqliteStore extends BaseSqliteStore implements WaRetryStore {
     public constructor(options: WaSqliteStorageOptions) {
-        if (!options.path || options.path.trim().length === 0) {
-            throw new Error('storage.sqlite.path must be a non-empty string')
-        }
-        if (!options.sessionId || options.sessionId.trim().length === 0) {
-            throw new Error('storage.sqlite.sessionId must be a non-empty string')
-        }
-        this.options = options
-        this.connectionPromise = null
+        super(options, ['retry'])
     }
 
     public async upsertOutboundMessage(record: WaRetryOutboundMessageRecord): Promise<void> {
@@ -260,12 +250,4 @@ export class WaRetrySqliteStore implements WaRetryStore {
         return asNumber(row.total, `${table}.count`)
     }
 
-    private async getConnection(): Promise<WaSqliteConnection> {
-        if (!this.connectionPromise) {
-            this.connectionPromise = openSqliteConnection(this.options).then((connection) => {
-                return ensureSqliteMigrations(connection, ['retry']).then(() => connection)
-            })
-        }
-        return this.connectionPromise
-    }
 }

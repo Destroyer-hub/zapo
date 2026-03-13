@@ -116,7 +116,8 @@ export function buildInboundRetryReceiptNode(
     messageNode: BinaryNode,
     id: string,
     to: string,
-    meJid?: string | null
+    meJid?: string | null,
+    retryCount = 1
 ): BinaryNode {
     const attrs: Record<string, string> = {
         id,
@@ -129,8 +130,10 @@ export function buildInboundRetryReceiptNode(
     if (meJid) {
         attrs.from = meJid
     }
+    const normalizedRetryCount =
+        Number.isSafeInteger(retryCount) && retryCount > 0 ? retryCount : 1
     const retryAttrs: Record<string, string> = {
-        count: '1',
+        count: String(normalizedRetryCount),
         id
     }
     const timestamp = messageNode.attrs.t

@@ -1,12 +1,10 @@
 import type { WaAuthCredentials } from '@auth/types'
 import type { Logger } from '@infra/log/types'
-import { WA_DEFAULTS, WA_XMLNS } from '@protocol/constants'
+import { WA_DEFAULTS } from '@protocol/constants'
 import { SIGNAL_UPLOAD_PREKEYS_COUNT } from '@signal/api/constants'
 import { buildPreKeyUploadIq, parsePreKeyUploadFailure } from '@signal/api/prekeys'
 import { generatePreKeyPair } from '@signal/registration/keygen'
 import type { WaSignalStore } from '@store/contracts/signal.store'
-import { findNodeChild } from '@transport/node/helpers'
-import { assertIqResult, buildIqNode } from '@transport/node/query'
 import type { BinaryNode } from '@transport/types'
 import { toError } from '@util/primitives'
 
@@ -36,16 +34,12 @@ export class WaPassiveTasksCoordinator {
     private readonly signalStore: WaSignalStore
     private readonly runtime: WaPassiveTasksRuntimePort
     private passiveTasksPromise: Promise<void> | null
-    private abPropsHash: string | null
-    private abPropsRefreshId: number | null
 
     public constructor(options: WaPassiveTasksCoordinatorOptions) {
         this.logger = options.logger
         this.signalStore = options.signalStore
         this.runtime = options.runtime
         this.passiveTasksPromise = null
-        this.abPropsHash = null
-        this.abPropsRefreshId = null
     }
 
     public startPassiveTasksAfterConnect(): void {
@@ -65,7 +59,10 @@ export class WaPassiveTasksCoordinator {
     }
 
     public resetInFlightState(): void {
-        this.passiveTasksPromise = null
+        if (!this.passiveTasksPromise) {
+            return
+        }
+        this.logger.trace('passive connect tasks reset requested while run is still in-flight')
     }
 
     private async runPassiveTasksAfterConnect(): Promise<void> {
@@ -77,7 +74,6 @@ export class WaPassiveTasksCoordinator {
         }
 
         await this.uploadPreKeysIfMissing()
-        this.logger.debug('abprops passive sync skipped: legacy abt iq path disabled')
         await this.flushDanglingReceipts()
     }
 
@@ -104,7 +100,6 @@ export class WaPassiveTasksCoordinator {
         }
 
         const lastPreKeyId = preKeys[preKeys.length - 1].keyId
-        await this.signalStore.markKeyAsUploaded(lastPreKeyId)
         const uploadNode = buildPreKeyUploadIq(registrationInfo, signedPreKey, preKeys)
         const response = await this.runtime.queryWithContext(
             'prekeys.upload',
@@ -116,6 +111,7 @@ export class WaPassiveTasksCoordinator {
             }
         )
         if (response.attrs.type === 'result') {
+            await this.signalStore.markKeyAsUploaded(lastPreKeyId)
             await this.signalStore.setServerHasPreKeys(true)
             await this.runtime.persistServerHasPreKeys(true)
             this.logger.info('uploaded prekeys to server', {
@@ -130,52 +126,6 @@ export class WaPassiveTasksCoordinator {
             count: preKeys.length,
             errorCode: failure.errorCode,
             errorText: failure.errorText
-        })
-    }
-
-    private async syncAbProps(): Promise<void> {
-        const propsAttrs: Record<string, string> = {
-            protocol: WA_DEFAULTS.ABPROPS_PROTOCOL_VERSION
-        }
-        if (this.abPropsHash) {
-            propsAttrs.hash = this.abPropsHash
-        }
-        if (this.abPropsRefreshId !== null) {
-            propsAttrs.refresh_id = `${this.abPropsRefreshId}`
-        }
-
-        const response = await this.runtime.queryWithContext(
-            'abprops.sync',
-            buildIqNode('get', WA_DEFAULTS.HOST_DOMAIN, WA_XMLNS.ABT, [
-                {
-                    tag: 'props',
-                    attrs: propsAttrs
-                }
-            ]),
-            WA_DEFAULTS.IQ_TIMEOUT_MS
-        )
-        assertIqResult(response, 'abprops')
-        const propsNode = findNodeChild(response, 'props')
-        if (!propsNode) {
-            this.logger.debug('abprops response has no props node')
-            return
-        }
-
-        const nextHash = propsNode.attrs.hash
-        if (nextHash && nextHash.length > 0) {
-            this.abPropsHash = nextHash
-        }
-        const nextRefreshIdRaw = propsNode.attrs.refresh_id
-        if (nextRefreshIdRaw !== undefined) {
-            const nextRefreshId = Number.parseInt(nextRefreshIdRaw, 10)
-            if (Number.isSafeInteger(nextRefreshId) && nextRefreshId >= 0) {
-                this.abPropsRefreshId = nextRefreshId
-            }
-        }
-
-        this.logger.info('abprops synchronized', {
-            hasHash: this.abPropsHash !== null,
-            refreshId: this.abPropsRefreshId
         })
     }
 

@@ -6,6 +6,11 @@ import { createHash, webcrypto } from 'node:crypto'
 
 import { EMPTY_BYTES, toBytesView } from '@util/bytes'
 
+/**
+ * Re-exported CryptoKey type so consumers don't need to import from 'node:crypto'
+ */
+export type CryptoKey = webcrypto.CryptoKey
+
 // ============================================
 // Hash functions
 // ============================================
@@ -119,8 +124,8 @@ export async function hmacSign(key: webcrypto.CryptoKey, data: Uint8Array): Prom
  * Used in Noise protocol for key splitting
  */
 export async function hkdfSplit64(
-    salt: Uint8Array,
-    inputKeyMaterial: Uint8Array
+    inputKeyMaterial: Uint8Array,
+    salt: Uint8Array = EMPTY_BYTES
 ): Promise<readonly [Uint8Array, Uint8Array]> {
     const key = await webcrypto.subtle.importKey('raw', inputKeyMaterial, 'HKDF', false, [
         'deriveBits'
@@ -137,4 +142,82 @@ export async function hkdfSplit64(
     )
     const output = toBytesView(bits)
     return [output.subarray(0, 32), output.subarray(32, 64)]
+}
+
+// ============================================
+// PBKDF2 → AES-CTR (for pairing code crypto)
+// ============================================
+
+export async function pbkdf2DeriveAesCtrKey(
+    password: Uint8Array,
+    salt: Uint8Array,
+    iterations: number
+): Promise<CryptoKey> {
+    const imported = await webcrypto.subtle.importKey('raw', password, { name: 'PBKDF2' }, false, [
+        'deriveKey'
+    ])
+    return webcrypto.subtle.deriveKey(
+        {
+            name: 'PBKDF2',
+            hash: 'SHA-256',
+            salt,
+            iterations
+        },
+        imported,
+        {
+            name: 'AES-CTR',
+            length: 256
+        },
+        false,
+        ['encrypt', 'decrypt']
+    )
+}
+
+// ============================================
+// AES-CTR (for pairing code crypto)
+// ============================================
+
+export async function aesCtrEncrypt(
+    key: CryptoKey,
+    counter: Uint8Array,
+    plaintext: Uint8Array
+): Promise<Uint8Array> {
+    const result = await webcrypto.subtle.encrypt(
+        { name: 'AES-CTR', counter, length: 64 },
+        key,
+        plaintext
+    )
+    return toBytesView(result)
+}
+
+export async function aesCtrDecrypt(
+    key: CryptoKey,
+    counter: Uint8Array,
+    ciphertext: Uint8Array
+): Promise<Uint8Array> {
+    const result = await webcrypto.subtle.decrypt(
+        { name: 'AES-CTR', counter, length: 64 },
+        key,
+        ciphertext
+    )
+    return toBytesView(result)
+}
+
+// ============================================
+// Ed25519 raw verify (for Signal variant sigs)
+// ============================================
+
+export async function ed25519VerifyRaw(
+    publicKey: Uint8Array,
+    signature: Uint8Array,
+    message: Uint8Array
+): Promise<boolean> {
+    const cryptoKey = await webcrypto.subtle.importKey(
+        'raw',
+        publicKey,
+        { name: 'Ed25519' },
+        false,
+        ['verify']
+    )
+    return webcrypto.subtle.verify('Ed25519', cryptoKey, signature, message)
 }

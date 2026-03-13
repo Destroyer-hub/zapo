@@ -35,6 +35,15 @@ export interface WaSendMessageOptions extends WaMessagePublishOptions {
     readonly expectedIdentity?: Uint8Array
 }
 
+export type WaIncomingNodeHandler = (node: BinaryNode) => Promise<boolean>
+
+export interface WaIncomingNodeHandlerRegistration {
+    readonly tag: string
+    readonly subtype?: string
+    readonly handler: WaIncomingNodeHandler
+    readonly prepend?: boolean
+}
+
 export interface WaIncomingBaseEvent {
     readonly rawNode: BinaryNode
     readonly id?: string

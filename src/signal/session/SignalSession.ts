@@ -11,7 +11,7 @@ import type {
     SignalSessionSnapshot
 } from '@signal/types'
 import type { WaSignalStore } from '@store/contracts/signal.store'
-import { cloneBytes, concatBytes, uint8Equal } from '@util/bytes'
+import { concatBytes, uint8Equal } from '@util/bytes'
 
 interface LocalIdentityContext {
     readonly regId: number
@@ -181,18 +181,25 @@ export function findMatchingSession(
     if (!session) {
         return null
     }
+    const serializedBaseKey = toSerializedPubKey(sessionBaseKey)
     if (
         session.aliceBaseKey &&
-        uint8Equal(session.aliceBaseKey, toSerializedPubKey(sessionBaseKey))
+        uint8Equal(session.aliceBaseKey, serializedBaseKey)
     ) {
         return session
     }
-    for (const prev of session.prevSessions) {
+    for (let index = 0; index < session.prevSessions.length; index += 1) {
+        const prev = session.prevSessions[index]
         if (
             prev.aliceBaseKey &&
-            uint8Equal(prev.aliceBaseKey, toSerializedPubKey(sessionBaseKey))
+            uint8Equal(prev.aliceBaseKey, serializedBaseKey)
         ) {
-            throw new Error('invalid prekey signal message')
+            const promoted = snapshotToRecord(prev)
+            return setPrevSessions(promoted, [
+                detachSession(session),
+                ...session.prevSessions.slice(0, index),
+                ...session.prevSessions.slice(index + 1)
+            ])
         }
     }
     return null
@@ -242,14 +249,22 @@ export async function initiateSessionOutgoing(
         remoteBundle.ratchetKey ?? remoteBundle.signedKey.publicKey
     )
 
+    const [signedDh, identityDh, baseDh, oneTimeDh] = await Promise.all([
+        ecdh(local.staticKeyPair.privKey, remoteSignedKey),
+        ecdh(localOneTimeBase.privKey, remoteIdentity),
+        ecdh(localOneTimeBase.privKey, remoteSignedKey),
+        remoteOneTimeKey
+            ? ecdh(localOneTimeBase.privKey, remoteOneTimeKey)
+            : Promise.resolve<Uint8Array | null>(null)
+    ])
     const secret = concatBytes([
         SIGNAL_PREFIX,
-        await ecdh(local.staticKeyPair.privKey, remoteSignedKey),
-        await ecdh(localOneTimeBase.privKey, remoteIdentity),
-        await ecdh(localOneTimeBase.privKey, remoteSignedKey),
-        ...(remoteOneTimeKey ? [await ecdh(localOneTimeBase.privKey, remoteOneTimeKey)] : [])
+        signedDh,
+        identityDh,
+        baseDh,
+        ...(oneTimeDh ? [oneTimeDh] : [])
     ])
-    const [rootKey, chainKey] = await hkdfSplit(secret, 'WhisperText', null)
+    const [rootKey, chainKey] = await hkdfSplit(secret, null, 'WhisperText')
 
     const recvChain = makeFreshRecvChain(remoteRatchetKey, chainKey)
     const sendRatchet = await generateSerializedKeyPair()
@@ -283,14 +298,22 @@ export async function initiateSessionIncoming(
     const baseKey = toSerializedPubKey(sessionBaseKey)
     const remotePub = toSerializedPubKey(remote.pubKey)
 
+    const [identityDh, staticDh, signedDh, oneTimeDh] = await Promise.all([
+        ecdh(localKeys.signed.privKey, remotePub),
+        ecdh(local.staticKeyPair.privKey, baseKey),
+        ecdh(localKeys.signed.privKey, baseKey),
+        localKeys.oneTime
+            ? ecdh(localKeys.oneTime.privKey, baseKey)
+            : Promise.resolve<Uint8Array | null>(null)
+    ])
     const secret = concatBytes([
         SIGNAL_PREFIX,
-        await ecdh(localKeys.signed.privKey, remotePub),
-        await ecdh(local.staticKeyPair.privKey, baseKey),
-        await ecdh(localKeys.signed.privKey, baseKey),
-        ...(localKeys.oneTime ? [await ecdh(localKeys.oneTime.privKey, baseKey)] : [])
+        identityDh,
+        staticDh,
+        signedDh,
+        ...(oneTimeDh ? [oneTimeDh] : [])
     ])
-    const [rootKey, chainKey] = await hkdfSplit(secret, 'WhisperText', null)
+    const [rootKey, chainKey] = await hkdfSplit(secret, null, 'WhisperText')
 
     return makeSession(
         { regId: local.regId, pubKey: local.staticKeyPair.pubKey },
@@ -316,7 +339,7 @@ export function toSerializedKeyPair(pair: {
 }): SignalSerializedKeyPair {
     return {
         pubKey: toSerializedPubKey(pair.pubKey),
-        privKey: cloneBytes(pair.privKey)
+        privKey: pair.privKey
     }
 }
 

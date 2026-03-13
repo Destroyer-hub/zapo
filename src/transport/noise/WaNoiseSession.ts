@@ -4,6 +4,7 @@ import { ConsoleLogger } from '@infra/log/ConsoleLogger'
 import type { Logger } from '@infra/log/types'
 import { BoundedTaskQueue } from '@infra/perf/BoundedTaskQueue'
 import { proto } from '@proto'
+import { WA_DEFAULTS } from '@protocol/constants'
 import {
     NOISE_IK_NAME,
     NOISE_XX_FALLBACK_NAME,
@@ -74,6 +75,7 @@ export class WaNoiseSession {
     private closedError: Error | null
     private noiseSocket: WaNoiseSocket | null
     private serverStaticKey: Uint8Array | null
+    private readonly handshakeFrameTimeoutMs: number
 
     public constructor(
         sendWire: (payload: Uint8Array) => Promise<void>,
@@ -91,6 +93,7 @@ export class WaNoiseSession {
         this.closedError = null
         this.noiseSocket = null
         this.serverStaticKey = null
+        this.handshakeFrameTimeoutMs = WA_DEFAULTS.CONNECT_TIMEOUT_MS
     }
 
     public async start(config: WaNoiseConfig): Promise<void> {
@@ -252,6 +255,37 @@ export class WaNoiseSession {
         protocolHeader: Uint8Array,
         verifyCertificates: boolean
     ): Promise<WaNoiseSocket> {
+        const resumeResult = await this.tryResumeHandshakeWithIk(
+            serverStaticKey,
+            clientStaticKeyPair,
+            ephemeralKeyPair,
+            payload,
+            protocolHeader
+        )
+        if (resumeResult.socket) {
+            return resumeResult.socket
+        }
+        this.logger.info('noise resume handshake fallback to XX')
+        return this.resumeHandshakeWithFallback(
+            clientStaticKeyPair,
+            ephemeralKeyPair,
+            payload,
+            protocolHeader,
+            resumeResult.serverHelloFrame,
+            verifyCertificates
+        )
+    }
+
+    private async tryResumeHandshakeWithIk(
+        serverStaticKey: Uint8Array,
+        clientStaticKeyPair: SignalKeyPair,
+        ephemeralKeyPair: SignalKeyPair,
+        payload: Uint8Array,
+        protocolHeader: Uint8Array
+    ): Promise<
+        | { readonly socket: WaNoiseSocket; readonly serverHelloFrame: null }
+        | { readonly socket: null; readonly serverHelloFrame: Uint8Array }
+    > {
         this.logger.trace('noise resume handshake: send IK client hello')
         const handshake = new WaNoiseHandshake()
         await handshake.start(NOISE_IK_NAME, protocolHeader)
@@ -280,30 +314,37 @@ export class WaNoiseSession {
         if (!serverHello) {
             throw new Error('noise resume handshake missing serverHello')
         }
-
-        if (!serverHello.static) {
-            if (!serverHello.ephemeral) {
-                throw new Error('noise resume handshake missing server ephemeral')
-            }
-            if (!serverHello.payload) {
-                throw new Error('noise resume handshake missing certificate payload')
-            }
-            const serverEphemeral = toBytesView(serverHello.ephemeral)
-            await handshake.authenticate(serverEphemeral)
-            await handshake.mixIntoKey(
-                await X25519.scalarMult(ephemeralKeyPair.privKey, serverEphemeral)
-            )
-            await handshake.mixIntoKey(
-                await X25519.scalarMult(clientStaticKeyPair.privKey, serverEphemeral)
-            )
-
-            await handshake.decrypt(toBytesView(serverHello.payload))
-            this.serverStaticKey = serverStaticKey
-            this.logger.info('noise resume handshake successful without fallback')
-            return handshake.finish()
+        if (serverHello.static) {
+            return { socket: null, serverHelloFrame }
         }
 
-        this.logger.info('noise resume handshake fallback to XX')
+        if (!serverHello.ephemeral) {
+            throw new Error('noise resume handshake missing server ephemeral')
+        }
+        if (!serverHello.payload) {
+            throw new Error('noise resume handshake missing certificate payload')
+        }
+        const serverEphemeral = toBytesView(serverHello.ephemeral)
+        await handshake.authenticate(serverEphemeral)
+        await handshake.mixIntoKey(await X25519.scalarMult(ephemeralKeyPair.privKey, serverEphemeral))
+        await handshake.mixIntoKey(
+            await X25519.scalarMult(clientStaticKeyPair.privKey, serverEphemeral)
+        )
+
+        await handshake.decrypt(toBytesView(serverHello.payload))
+        this.serverStaticKey = serverStaticKey
+        this.logger.info('noise resume handshake successful without fallback')
+        return { socket: await handshake.finish(), serverHelloFrame: null }
+    }
+
+    private async resumeHandshakeWithFallback(
+        clientStaticKeyPair: SignalKeyPair,
+        ephemeralKeyPair: SignalKeyPair,
+        payload: Uint8Array,
+        protocolHeader: Uint8Array,
+        serverHelloFrame: Uint8Array,
+        verifyCertificates: boolean
+    ): Promise<WaNoiseSocket> {
         const fallback = new WaNoiseHandshake()
         await fallback.start(NOISE_XX_FALLBACK_NAME, protocolHeader)
         await fallback.authenticate(ephemeralKeyPair.pubKey)
@@ -394,8 +435,26 @@ export class WaNoiseSession {
                 reject(this.closedError)
                 return
             }
-            this.handshakeWaiter = resolve
-            this.handshakeRejecter = reject
+            const timeout = setTimeout(() => {
+                if (this.handshakeWaiter === resolve) {
+                    this.handshakeWaiter = null
+                    this.handshakeRejecter = null
+                }
+                reject(
+                    new Error(
+                        `noise handshake frame timeout after ${this.handshakeFrameTimeoutMs}ms`
+                    )
+                )
+            }, this.handshakeFrameTimeoutMs)
+            timeout.unref?.()
+            this.handshakeWaiter = (frame) => {
+                clearTimeout(timeout)
+                resolve(frame)
+            }
+            this.handshakeRejecter = (error) => {
+                clearTimeout(timeout)
+                reject(error)
+            }
         }).catch((error) => {
             throw toError(error)
         })

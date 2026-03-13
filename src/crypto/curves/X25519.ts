@@ -1,10 +1,10 @@
 import { webcrypto } from 'node:crypto'
 
 import { assert32, decodeBase64Url } from '@crypto/core/encoding'
-import { CURVE_P, X25519_PKCS8_PREFIX } from '@crypto/curves/constants'
+import { X25519_PKCS8_PREFIX } from '@crypto/curves/constants'
 import type { SignalKeyPair } from '@crypto/curves/types'
 import { bigIntToBytesLE, bytesToBigIntLE } from '@crypto/math/le'
-import { mod, modInv } from '@crypto/math/mod'
+import { FIELD_P, mod, modInv } from '@crypto/math/mod'
 import { toBytesView } from '@util/bytes'
 
 type SubtleKeyPair = {
@@ -19,17 +19,7 @@ function pkcs8FromRawPrivate(raw: Uint8Array): Uint8Array {
     return out
 }
 
-export function rawCurvePublicKey(publicKey: Uint8Array): Uint8Array {
-    if (publicKey.length === 32) {
-        return publicKey
-    }
-    if (publicKey.length === 33 && publicKey[0] === 5) {
-        return publicKey.subarray(1)
-    }
-    throw new Error(`invalid curve25519 public key length ${publicKey.length}`)
-}
-
-export function clampCurvePrivateKey(privateKey: Uint8Array): Uint8Array {
+export function clampCurvePrivateKeyInPlace(privateKey: Uint8Array): Uint8Array {
     if (privateKey.length !== 32) {
         throw new Error(`invalid curve25519 private key length ${privateKey.length}`)
     }
@@ -40,24 +30,17 @@ export function clampCurvePrivateKey(privateKey: Uint8Array): Uint8Array {
 }
 
 export function montgomeryToEdwardsPublic(curvePublicKey: Uint8Array, signBit: number): Uint8Array {
+    if (curvePublicKey.length !== 32) {
+        throw new Error(`invalid curve25519 public key length ${curvePublicKey.length}`)
+    }
     const x = bytesToBigIntLE(curvePublicKey)
+    if (x === FIELD_P - 1n) {
+        throw new Error('invalid curve25519 low-order public key')
+    }
     const y = mod((x - 1n) * modInv(x + 1n))
     const encoded = bigIntToBytesLE(y, 32)
     encoded[31] = (encoded[31] & 0x7f) | (signBit & 0x80)
     return encoded
-}
-
-export function montgomeryToEdwardsPubKey(montgomeryX: Uint8Array, signBit: number): Uint8Array {
-    if (montgomeryX.length !== 32) {
-        throw new Error('invalid montgomery public key length')
-    }
-    const u = bytesToBigIntLE(montgomeryX) % CURVE_P
-    const numerator = (u - 1n + CURVE_P) % CURVE_P
-    const denominator = (u + 1n) % CURVE_P
-    const y = (numerator * modInv(denominator, CURVE_P)) % CURVE_P
-    const out = bigIntToBytesLE(y, 32)
-    out[31] = (out[31] & 0x7f) | signBit
-    return out
 }
 
 export class X25519 {

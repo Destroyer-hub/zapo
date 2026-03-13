@@ -1,5 +1,39 @@
-export * from '@signal/constants'
-export * from '@signal/types'
+export {
+    CHAIN_KEY_LABEL,
+    FUTURE_MESSAGES_MAX,
+    KEY_TYPE_CURVE25519,
+    MAX_PREV_SESSIONS,
+    MAX_UNUSED_KEYS,
+    MESSAGE_KEY_LABEL,
+    SENDER_KEY_FUTURE_MESSAGES_MAX,
+    SERIALIZED_PUB_KEY_PREFIX,
+    SIGNAL_GROUP_VERSION,
+    SIGNAL_MAC_SIZE,
+    SIGNAL_PREFIX,
+    SIGNAL_VERSION,
+    SIGNATURE_SIZE,
+    WHISPER_GROUP_INFO
+} from '@signal/constants'
+export type {
+    ParsedPreKeySignalMessage,
+    ParsedSignalMessage,
+    PreKeyRecord,
+    RegistrationInfo,
+    SenderKeyDistributionRecord,
+    SenderKeyRecord,
+    SenderMessageKey,
+    SignalAddress,
+    SignalInitialExchangeInfo,
+    SignalMessageKey,
+    SignalPeer,
+    SignalPreKeyBundle,
+    SignalRecvChain,
+    SignalSendChain,
+    SignalSerializedKeyPair,
+    SignalSessionRecord,
+    SignalSessionSnapshot,
+    SignedPreKeyRecord
+} from '@signal/types'
 export {
     generatePreKeyPair,
     generateRegistrationId,
@@ -16,8 +50,12 @@ export {
     ADV_PREFIX_HOSTED_DEVICE_SIGNATURE,
     WaAdvSignature
 } from '@signal/crypto/WaAdvSignature'
+export {
+    deriveSenderKeyMsgKey,
+    selectMessageKey,
+    type SenderKeyMessageKeyDerivation,
+    type SenderKeyMessageKeySelection
+} from '@signal/group/SenderKeyChain'
 export { SenderKeyManager } from '@signal/group/SenderKeyManager'
-export { SenderKeyStore } from '@store/providers/sqlite/sender-key.store'
 export { createAndStoreInitialKeys } from '@signal/registration/utils'
 export { SignalProtocol } from '@signal/session/SignalProtocol'
-export { WaSignalStore } from '@store/providers/sqlite/signal.store'

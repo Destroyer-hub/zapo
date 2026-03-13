@@ -1,15 +1,12 @@
-import { webcrypto } from 'node:crypto'
-
-import { buildNonce } from '@crypto'
-import { EMPTY_BYTES, toBytesView } from '@util/bytes'
+import { type CryptoKey, aesGcmDecrypt, aesGcmEncrypt, buildNonce } from '@crypto'
 
 export class WaNoiseSocket {
-    private readonly encryptKey: webcrypto.CryptoKey
-    private readonly decryptKey: webcrypto.CryptoKey
+    private readonly encryptKey: CryptoKey
+    private readonly decryptKey: CryptoKey
     private writeCounter: number
     private readCounter: number
 
-    public constructor(encryptKey: webcrypto.CryptoKey, decryptKey: webcrypto.CryptoKey) {
+    public constructor(encryptKey: CryptoKey, decryptKey: CryptoKey) {
         this.encryptKey = encryptKey
         this.decryptKey = decryptKey
         this.writeCounter = 0
@@ -18,29 +15,11 @@ export class WaNoiseSocket {
 
     public async encrypt(frame: Uint8Array, additionalData?: Uint8Array): Promise<Uint8Array> {
         const nonce = buildNonce(this.writeCounter++)
-        const encrypted = await webcrypto.subtle.encrypt(
-            {
-                name: 'AES-GCM',
-                iv: nonce,
-                additionalData: additionalData ?? EMPTY_BYTES
-            },
-            this.encryptKey,
-            frame
-        )
-        return toBytesView(encrypted)
+        return aesGcmEncrypt(this.encryptKey, nonce, frame, additionalData)
     }
 
     public async decrypt(frame: Uint8Array, additionalData?: Uint8Array): Promise<Uint8Array> {
         const nonce = buildNonce(this.readCounter++)
-        const decrypted = await webcrypto.subtle.decrypt(
-            {
-                name: 'AES-GCM',
-                iv: nonce,
-                additionalData: additionalData ?? EMPTY_BYTES
-            },
-            this.decryptKey,
-            frame
-        )
-        return toBytesView(decrypted)
+        return aesGcmDecrypt(this.decryptKey, nonce, frame, additionalData)
     }
 }

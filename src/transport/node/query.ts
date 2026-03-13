@@ -14,10 +14,10 @@ export function buildIqNode(
     return {
         tag: WA_NODE_TAGS.IQ,
         attrs: {
+            ...attrs,
             to,
             type,
-            xmlns,
-            ...attrs
+            xmlns
         },
         ...(content !== undefined ? { content } : {})
     }

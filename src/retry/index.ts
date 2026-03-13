@@ -8,7 +8,6 @@ export {
 export type { WaRetryReasonCode } from '@retry/constants'
 export { mapRetryReasonFromError } from '@retry/reason'
 export { parseRetryReceiptRequest } from '@retry/parse'
-export { buildRetryAckNode, buildRetryReceiptNode } from '@transport/node/builders/retry'
 export type {
     WaParsedRetryRequest,
     WaRetryDecryptFailureContext,
@@ -29,3 +28,4 @@ export {
     encodeRetryReplayPayload,
     pickRetryStateMax
 } from '@retry/outbound'
+export { WaRetryReplayService, type WaRetryReplayServiceOptions, type WaRetryResendResult } from '@retry/replay'

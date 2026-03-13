@@ -4,12 +4,31 @@ import type {
     WaAppStateStoreData,
     WaAppStateSyncKey
 } from '@appstate/types'
-import { keyDeviceId, keyEpoch, keyIdToHex } from '@appstate/utils'
+import { keyIdToHex, pickActiveSyncKey } from '@appstate/utils'
 import type {
+    WaAppStateCollectionStateUpdate,
     WaAppStateCollectionStoreState,
     WaAppStateStore
 } from '@store/contracts/appstate.store'
 import { uint8Equal } from '@util/bytes'
+import { setBoundedMapEntry } from '@util/collections'
+import { readPositiveLimit } from '@util/env'
+
+const DEFAULT_APPSTATE_MEMORY_STORE_LIMITS = Object.freeze({
+    syncKeys: 4_096,
+    collectionEntries: 50_000
+})
+
+function toBoundedMap<K, V>(
+    entries: Iterable<readonly [K, V]>,
+    maxEntries: number
+): Map<K, V> {
+    const map = new Map<K, V>()
+    for (const [key, value] of entries) {
+        setBoundedMapEntry(map, key, value, maxEntries)
+    }
+    return map
+}
 
 interface MutableCollectionState {
     version: number
@@ -20,13 +39,23 @@ interface MutableCollectionState {
 export class WaAppStateMemoryStore implements WaAppStateStore {
     private readonly keys: Map<string, WaAppStateSyncKey>
     private readonly collections: Map<AppStateCollectionName, MutableCollectionState>
+    private readonly maxSyncKeys: number
+    private readonly maxCollectionEntries: number
 
     public constructor(initial?: WaAppStateStoreData) {
         this.keys = new Map()
         this.collections = new Map()
+        this.maxSyncKeys = readPositiveLimit(
+            'WA_APPSTATE_MEMORY_STORE_MAX_SYNC_KEYS',
+            DEFAULT_APPSTATE_MEMORY_STORE_LIMITS.syncKeys
+        )
+        this.maxCollectionEntries = readPositiveLimit(
+            'WA_APPSTATE_MEMORY_STORE_MAX_COLLECTION_ENTRIES',
+            DEFAULT_APPSTATE_MEMORY_STORE_LIMITS.collectionEntries
+        )
         if (initial) {
             for (const key of initial.keys) {
-                this.keys.set(keyIdToHex(key.keyId), key)
+                setBoundedMapEntry(this.keys, keyIdToHex(key.keyId), key, this.maxSyncKeys)
             }
             for (const [collectionName, collection] of Object.entries(
                 initial.collections
@@ -40,7 +69,10 @@ export class WaAppStateMemoryStore implements WaAppStateStore {
                 this.collections.set(collectionName, {
                     version: collection.version,
                     hash: collection.hash,
-                    indexValueMap: new Map(Object.entries(collection.indexValueMap))
+                    indexValueMap: toBoundedMap(
+                        Object.entries(collection.indexValueMap),
+                        this.maxCollectionEntries
+                    )
                 })
             }
         }
@@ -70,7 +102,7 @@ export class WaAppStateMemoryStore implements WaAppStateStore {
             if (existing && uint8Equal(existing.keyData, key.keyData)) {
                 continue
             }
-            this.keys.set(keyHex, key)
+            setBoundedMapEntry(this.keys, keyHex, key, this.maxSyncKeys)
             inserted += 1
         }
         return inserted
@@ -81,26 +113,7 @@ export class WaAppStateMemoryStore implements WaAppStateStore {
     }
 
     public async getActiveSyncKey(): Promise<WaAppStateSyncKey | null> {
-        let active: WaAppStateSyncKey | null = null
-        for (const key of this.keys.values()) {
-            if (!active) {
-                active = key
-                continue
-            }
-            const currentEpoch = keyEpoch(active.keyId)
-            const nextEpoch = keyEpoch(key.keyId)
-            if (nextEpoch > currentEpoch) {
-                active = key
-                continue
-            }
-            if (nextEpoch < currentEpoch) {
-                continue
-            }
-            if (keyDeviceId(key.keyId) < keyDeviceId(active.keyId)) {
-                active = key
-            }
-        }
-        return active
+        return pickActiveSyncKey(this.keys.values())
     }
 
     public async getCollectionState(
@@ -127,8 +140,21 @@ export class WaAppStateMemoryStore implements WaAppStateStore {
         this.collections.set(collection, {
             version,
             hash,
-            indexValueMap: new Map(indexValueMap)
+            indexValueMap: toBoundedMap(indexValueMap.entries(), this.maxCollectionEntries)
         })
+    }
+
+    public async setCollectionStates(
+        updates: readonly WaAppStateCollectionStateUpdate[]
+    ): Promise<void> {
+        for (const update of updates) {
+            await this.setCollectionState(
+                update.collection,
+                update.version,
+                update.hash,
+                update.indexValueMap
+            )
+        }
     }
 
     public async clear(): Promise<void> {

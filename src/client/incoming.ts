@@ -137,6 +137,15 @@ export function createIncomingReceiptHandler(
     options: IncomingNodeHandlerOptions
 ): (node: BinaryNode) => Promise<boolean> {
     return createSimpleIncomingHandler(WA_MESSAGE_TAGS.RECEIPT, async (node) => {
+        if (!node.attrs.id || !node.attrs.from) {
+            options.logger.warn('incoming receipt missing required attrs for ack', {
+                hasFrom: node.attrs.from !== undefined,
+                hasId: node.attrs.id !== undefined,
+                type: node.attrs.type
+            })
+            return
+        }
+
         options.emitIncomingReceipt({
             ...buildBaseEvent(node),
             participant: node.attrs.participant,
@@ -155,15 +164,6 @@ export function createIncomingReceiptHandler(
         }
 
         const receiptType = node.attrs.type
-        if (!node.attrs.id || !node.attrs.from) {
-            options.logger.warn('incoming receipt missing required attrs for ack', {
-                hasFrom: node.attrs.from !== undefined,
-                hasId: node.attrs.id !== undefined,
-                type: receiptType
-            })
-            return
-        }
-
         if (receiptType === 'retry' || receiptType === 'enc_rekey_retry') {
             if (options.handleIncomingRetryReceipt) {
                 await options.handleIncomingRetryReceipt(node)

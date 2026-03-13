@@ -1,12 +1,12 @@
 import { WaAppStateMemoryStore } from '@store/providers/memory/appstate.store'
 import { WaRetryMemoryStore } from '@store/providers/memory/retry.store'
-import { SenderKeyStore as SenderKeyMemoryStore } from '@store/providers/memory/sender-key.store'
-import { WaSignalStore as WaSignalMemoryStore } from '@store/providers/memory/signal.store'
+import { SenderKeyMemoryStore } from '@store/providers/memory/sender-key.store'
+import { WaSignalMemoryStore } from '@store/providers/memory/signal.store'
 import { WaAppStateSqliteStore } from '@store/providers/sqlite/appstate.store'
 import { WaAuthSqliteStore } from '@store/providers/sqlite/auth.store'
 import { WaRetrySqliteStore } from '@store/providers/sqlite/retry.store'
-import { SenderKeyStore as SenderKeySqliteStore } from '@store/providers/sqlite/sender-key.store'
-import { WaSignalStore as WaSignalSqliteStore } from '@store/providers/sqlite/signal.store'
+import { SenderKeySqliteStore } from '@store/providers/sqlite/sender-key.store'
+import { WaSignalSqliteStore } from '@store/providers/sqlite/signal.store'
 import type {
     WaCreateStoreCustomProviders,
     WaCreateStoreOptions,
@@ -24,16 +24,16 @@ const DEFAULT_PROVIDERS: Required<WaStoreProviderSelection> = {
     retry: 'sqlite'
 }
 
-function resolveCustomStore<T>(
+function resolveStoreValue<T>(
     sessionId: string,
-    custom: WaStoreDomainValueOrFactory<T> | undefined,
+    value: WaStoreDomainValueOrFactory<T> | undefined,
     domain: keyof WaCreateStoreCustomProviders
 ): T | null {
-    if (!custom) {
+    if (!value) {
         return null
     }
     const resolved =
-        typeof custom === 'function' ? (custom as (id: string) => T)(sessionId) : custom
+        typeof value === 'function' ? (value as (id: string) => T)(sessionId) : value
     if (!resolved) {
         throw new Error(`custom.${domain} must resolve to a store instance`)
     }
@@ -60,19 +60,19 @@ export function createStore(options: WaCreateStoreOptions): WaStore {
             }
 
             const custom = options.custom
-            const customAuth = resolveCustomStore(normalizedSessionId, custom?.auth, 'auth')
-            const customSignal = resolveCustomStore(normalizedSessionId, custom?.signal, 'signal')
-            const customSenderKey = resolveCustomStore(
+            const customAuth = resolveStoreValue(normalizedSessionId, custom?.auth, 'auth')
+            const customSignal = resolveStoreValue(normalizedSessionId, custom?.signal, 'signal')
+            const customSenderKey = resolveStoreValue(
                 normalizedSessionId,
                 custom?.senderKey,
                 'senderKey'
             )
-            const customAppState = resolveCustomStore(
+            const customAppState = resolveStoreValue(
                 normalizedSessionId,
                 custom?.appState,
                 'appState'
             )
-            const customRetry = resolveCustomStore(normalizedSessionId, custom?.retry, 'retry')
+            const customRetry = resolveStoreValue(normalizedSessionId, custom?.retry, 'retry')
 
             const requiresSqlite =
                 !customAuth ||

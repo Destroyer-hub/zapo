@@ -6,7 +6,7 @@ import {
     SIGNAL_REGISTRATION_ID_LENGTH,
     SIGNAL_SIGNATURE_LENGTH
 } from '@signal/api/constants'
-import { decodeBinaryNodeContent, findNodeChild } from '@transport/node/helpers'
+import { decodeNodeContentBase64OrBytes, findNodeChild } from '@transport/node/helpers'
 import { parseOptionalInt } from '@transport/stream/parse'
 import type { BinaryNode } from '@transport/types'
 
@@ -15,7 +15,7 @@ function parseFixedLengthBytes(
     byteLength: number,
     field: string
 ): Uint8Array {
-    const out = decodeBinaryNodeContent(value, field)
+    const out = decodeNodeContentBase64OrBytes(value, field)
     if (out.byteLength !== byteLength) {
         throw new Error(`${field} must be ${byteLength} bytes`)
     }
@@ -83,7 +83,7 @@ function parseRetryKeyBundle(node: BinaryNode | undefined): WaRetryKeyBundle | u
             'retry.keys.identity'
         ),
         deviceIdentity: deviceIdentityNode
-            ? decodeBinaryNodeContent(deviceIdentityNode.content, 'retry.keys.device-identity')
+            ? decodeNodeContentBase64OrBytes(deviceIdentityNode.content, 'retry.keys.device-identity')
             : undefined,
         key:
             keyIdNode && keyValueNode

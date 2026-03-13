@@ -1,6 +1,6 @@
 import { ConsoleLogger } from '@infra/log/ConsoleLogger'
 import type { Logger } from '@infra/log/types'
-import { BoundedTaskQueue, isBoundedTaskQueueFullError } from '@infra/perf/BoundedTaskQueue'
+import { BoundedTaskQueue, BoundedTaskQueueFullError } from '@infra/perf/BoundedTaskQueue'
 import { WA_DEFAULTS } from '@protocol/constants'
 import { WaNoiseSession } from '@transport/noise/WaNoiseSession'
 import type { SocketCloseInfo, WaCommsConfig, WaCommsState } from '@transport/types'
@@ -502,7 +502,7 @@ export class WaComms {
                 this.logger.error('failed to enqueue decoded frame handler', {
                     message: normalized.message
                 })
-                if (!isBoundedTaskQueueFullError(error)) {
+                if (!(error instanceof BoundedTaskQueueFullError)) {
                     return
                 }
                 this.logger.warn('frame handler queue is full, processing frame inline', {

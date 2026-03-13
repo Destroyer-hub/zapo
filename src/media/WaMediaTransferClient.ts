@@ -5,7 +5,7 @@ import { DEFAULT_MEDIA_HOSTS } from '@media/constants'
 import type { MediaCryptoType, WaMediaTransferClientOptions } from '@media/types'
 import { WaMediaCrypto } from '@media/WaMediaCrypto'
 import { WA_DEFAULTS } from '@protocol/constants'
-import { EMPTY_BYTES, toBufferChunk } from '@util/bytes'
+import { EMPTY_BYTES, readAllBytes } from '@util/bytes'
 import { toError } from '@util/primitives'
 
 interface StreamDownloadRequest {
@@ -15,6 +15,7 @@ interface StreamDownloadRequest {
     readonly headers?: Readonly<Record<string, string>>
     readonly timeoutMs?: number
     readonly signal?: AbortSignal
+    readonly maxBytes?: number
 }
 
 interface StreamUploadRequest extends StreamDownloadRequest {
@@ -88,12 +89,14 @@ export class WaMediaTransferClient {
     private readonly logger?: Logger
     private readonly defaultHosts: readonly string[]
     private readonly defaultTimeoutMs: number
+    private readonly defaultMaxReadBytes: number | undefined
     private readonly defaultHeaders: Readonly<Record<string, string>>
 
     public constructor(options: WaMediaTransferClientOptions = {}) {
         this.logger = options.logger
         this.defaultHosts = options.defaultHosts ?? DEFAULT_MEDIA_HOSTS
         this.defaultTimeoutMs = options.defaultTimeoutMs ?? WA_DEFAULTS.MEDIA_TIMEOUT_MS
+        this.defaultMaxReadBytes = options.defaultMaxReadBytes
         this.defaultHeaders = options.defaultHeaders ?? {}
     }
 
@@ -120,7 +123,7 @@ export class WaMediaTransferClient {
         if (!response.body) {
             return EMPTY_BYTES
         }
-        return this.readAll(response.body)
+        return this.readAllBytesWithLimit(response.body, request.maxBytes)
     }
 
     public async uploadStream(request: StreamUploadRequest): Promise<StreamTransferResponse> {
@@ -212,7 +215,7 @@ export class WaMediaTransferClient {
         })
         const decrypted = await this.downloadAndDecryptStream(request)
         try {
-            const plaintext = await this.readAll(decrypted.plaintext)
+            const plaintext = await this.readAllBytesWithLimit(decrypted.plaintext, request.maxBytes)
             await decrypted.metadata
             this.logger?.info('media encrypted download completed', {
                 byteLength: plaintext.byteLength
@@ -247,11 +250,14 @@ export class WaMediaTransferClient {
         }
     }
 
-    public async readResponseBytes(response: StreamTransferResponse): Promise<Uint8Array> {
+    public async readResponseBytes(
+        response: StreamTransferResponse,
+        maxBytes?: number
+    ): Promise<Uint8Array> {
         if (!response.body) {
             return EMPTY_BYTES
         }
-        return this.readAll(response.body)
+        return this.readAllBytesWithLimit(response.body, maxBytes)
     }
 
     private resolveTransferRequest(
@@ -386,6 +392,12 @@ export class WaMediaTransferClient {
         return merged
     }
 
+    private readAllBytesWithLimit(stream: Readable, maxBytes: number | undefined): Promise<Uint8Array> {
+        return readAllBytes(stream, {
+            maxBytes: maxBytes ?? this.defaultMaxReadBytes
+        })
+    }
+
     private async fetchWithFallback(
         urls: readonly string[],
         timeoutMs: number,
@@ -502,30 +514,5 @@ export class WaMediaTransferClient {
         } catch {
             // ignore drain errors
         }
-    }
-
-    private async readAll(body: Readable): Promise<Uint8Array> {
-        const chunks: Uint8Array[] = []
-        let total = 0
-        for await (const chunk of body) {
-            const bytes = toBufferChunk(chunk)
-            chunks.push(bytes)
-            total += bytes.byteLength
-        }
-
-        if (total === 0) {
-            return EMPTY_BYTES
-        }
-        if (chunks.length === 1) {
-            return chunks[0]
-        }
-        const merged = new Uint8Array(total)
-        let offset = 0
-        for (const chunk of chunks) {
-            merged.set(chunk, offset)
-            offset += chunk.byteLength
-        }
-        this.logger?.trace('media readAll merged chunks', { total, chunks: chunks.length })
-        return merged
     }
 }

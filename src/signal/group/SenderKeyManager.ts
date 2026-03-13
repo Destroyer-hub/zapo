@@ -1,42 +1,27 @@
-import { webcrypto } from 'node:crypto'
-
-import { X25519 } from '@crypto'
 import {
-    hkdfWithBytesInfo,
+    aesCbcDecrypt,
+    aesCbcEncrypt,
+    importAesCbcKey,
     toSerializedPubKey,
     prependVersion,
-    readVersionedContent,
     randomBytesAsync,
-    randomIntAsync
+    randomIntAsync,
+    X25519
 } from '@crypto'
 import { proto } from '@proto'
 import {
-    CHAIN_KEY_LABEL,
-    MAX_UNUSED_KEYS,
-    MESSAGE_KEY_LABEL,
-    SENDER_KEY_FUTURE_MESSAGES_MAX,
     SIGNAL_GROUP_VERSION,
-    SIGNATURE_SIZE,
-    WHISPER_GROUP_INFO
+    SIGNATURE_SIZE
 } from '@signal/constants'
 import { WaAdvSignature } from '@signal/crypto/WaAdvSignature'
-import type { SenderKeyRecord, SenderMessageKey, SignalAddress } from '@signal/types'
+import { deriveSenderKeyMsgKey, selectMessageKey } from '@signal/group/SenderKeyChain'
+import {
+    parseDistributionPayload,
+    parseSenderKeyMessage
+} from '@signal/group/SenderKeyCodec'
+import type { SenderKeyRecord, SignalAddress } from '@signal/types'
 import type { WaSenderKeyStore } from '@store/contracts/sender-key.store'
-import { concatBytes, removeAt, toBytesView } from '@util/bytes'
-
-interface ParsedDistributionPayload {
-    readonly keyId: number
-    readonly iteration: number
-    readonly chainKey: Uint8Array
-    readonly signingPublicKey: Uint8Array
-}
-
-interface ParsedSenderKeyMessage {
-    readonly keyId: number
-    readonly iteration: number
-    readonly ciphertext: Uint8Array
-    readonly versionContentMac: Uint8Array
-}
+import { concatBytes } from '@util/bytes'
 
 interface GroupSenderKeyCiphertext {
     readonly groupId: string
@@ -109,7 +94,7 @@ export class SenderKeyManager {
             throw new Error('sender key distribution missing groupId')
         }
 
-        const parsed = this.parseDistributionPayload(payload)
+        const parsed = parseDistributionPayload(payload)
         const record: SenderKeyRecord = {
             groupId,
             sender,
@@ -139,7 +124,7 @@ export class SenderKeyManager {
             throw new Error('sender private signing key is missing')
         }
 
-        const derived = await this.deriveSenderKeyMsgKey(senderKey.iteration, senderKey.chainKey)
+        const derived = await deriveSenderKeyMsgKey(senderKey.iteration, senderKey.chainKey)
         const messagePayload = await this.aesCbcEncryptFromSeed(derived.messageKey.seed, plaintext)
         const senderKeyMessage = proto.SenderKeyMessage.encode({
             id: senderKey.keyId,
@@ -172,7 +157,7 @@ export class SenderKeyManager {
     }
 
     public async decryptGroupMessage(payload: GroupSenderKeyCiphertext): Promise<Uint8Array> {
-        const parsed = this.parseSenderKeyMessage(payload.ciphertext)
+        const parsed = parseSenderKeyMessage(payload.ciphertext)
 
         const senderKey = await this.store.getDeviceSenderKey(payload.groupId, payload.sender)
         if (!senderKey) {
@@ -187,9 +172,6 @@ export class SenderKeyManager {
             payload.keyId !== null &&
             parsed.keyId !== payload.keyId
         ) {
-            throw new Error('sender key id mismatch')
-        }
-        if (parsed.keyId !== senderKey.keyId) {
             throw new Error('sender key id mismatch')
         }
         if (
@@ -216,7 +198,7 @@ export class SenderKeyManager {
             throw new Error('invalid sender key signature')
         }
 
-        const selected = await this.selectMessageKey(senderKey, parsed.iteration)
+        const selected = await selectMessageKey(senderKey, parsed.iteration)
         const plaintext = await this.aesCbcDecryptFromSeed(
             selected.messageKey.seed,
             parsed.ciphertext
@@ -249,174 +231,13 @@ export class SenderKeyManager {
         return created
     }
 
-    private parseDistributionPayload(payload: Uint8Array): ParsedDistributionPayload {
-        const body = readVersionedContent(payload, SIGNAL_GROUP_VERSION, 0)
-        const decoded = proto.SenderKeyDistributionMessage.decode(body)
-        if (
-            decoded.id === null ||
-            decoded.id === undefined ||
-            decoded.iteration === null ||
-            decoded.iteration === undefined ||
-            decoded.chainKey === null ||
-            decoded.chainKey === undefined ||
-            decoded.signingKey === null ||
-            decoded.signingKey === undefined
-        ) {
-            throw new Error('invalid sender key distribution message')
-        }
-
-        const chainKey = toBytesView(decoded.chainKey)
-        if (chainKey.length !== 32) {
-            throw new Error('sender key distribution chainKey must be 32 bytes')
-        }
-
-        return {
-            keyId: decoded.id,
-            iteration: decoded.iteration,
-            chainKey,
-            signingPublicKey: toSerializedPubKey(toBytesView(decoded.signingKey))
-        }
-    }
-
-    private parseSenderKeyMessage(versionContentMac: Uint8Array): ParsedSenderKeyMessage {
-        const body = readVersionedContent(versionContentMac, SIGNAL_GROUP_VERSION, SIGNATURE_SIZE)
-        const decoded = proto.SenderKeyMessage.decode(body)
-        if (
-            decoded.id === null ||
-            decoded.id === undefined ||
-            decoded.iteration === null ||
-            decoded.iteration === undefined ||
-            decoded.ciphertext === null ||
-            decoded.ciphertext === undefined
-        ) {
-            throw new Error('invalid sender key message')
-        }
-
-        return {
-            keyId: decoded.id,
-            iteration: decoded.iteration,
-            ciphertext: toBytesView(decoded.ciphertext),
-            versionContentMac
-        }
-    }
-
-    private async selectMessageKey(
-        senderKey: SenderKeyRecord,
-        targetIteration: number
-    ): Promise<{ messageKey: SenderMessageKey; updatedRecord: SenderKeyRecord }> {
-        const delta = targetIteration - senderKey.iteration
-        if (delta > SENDER_KEY_FUTURE_MESSAGES_MAX) {
-            throw new Error('sender key message is too far in future')
-        }
-
-        const currentUnused = senderKey.unusedMessageKeys ? senderKey.unusedMessageKeys.slice() : []
-        if (delta < 0) {
-            const foundIndex = currentUnused.findIndex(
-                (entry) => entry.iteration === targetIteration
-            )
-            if (foundIndex === -1) {
-                throw new Error('sender key message iteration is stale')
-            }
-
-            const messageKey = currentUnused[foundIndex]
-            const nextUnused = removeAt(currentUnused, foundIndex)
-            return {
-                messageKey,
-                updatedRecord: {
-                    ...senderKey,
-                    unusedMessageKeys: nextUnused
-                }
-            }
-        }
-
-        const firstDerived = await this.deriveSenderKeyMsgKey(
-            senderKey.iteration,
-            senderKey.chainKey
-        )
-        let nextChainKey = firstDerived.nextChainKey
-        let messageKey = firstDerived.messageKey
-        let nextUnused = currentUnused.slice()
-
-        if (delta > 0) {
-            let overflow = delta + currentUnused.length - MAX_UNUSED_KEYS
-            if (overflow > 0) {
-                nextUnused = currentUnused.slice(overflow)
-                overflow -= currentUnused.length
-            }
-
-            for (
-                let iteration = senderKey.iteration + 1;
-                iteration <= targetIteration;
-                iteration += 1
-            ) {
-                if (overflow > 0) {
-                    overflow -= 1
-                } else {
-                    nextUnused.push(messageKey)
-                }
-
-                const derived = await this.deriveSenderKeyMsgKey(iteration, nextChainKey)
-                nextChainKey = derived.nextChainKey
-                messageKey = derived.messageKey
-            }
-        }
-
-        return {
-            messageKey,
-            updatedRecord: {
-                ...senderKey,
-                iteration: targetIteration + 1,
-                chainKey: nextChainKey,
-                unusedMessageKeys: nextUnused
-            }
-        }
-    }
-
-    private async deriveSenderKeyMsgKey(
-        iteration: number,
-        chainKey: Uint8Array
-    ): Promise<{ nextChainKey: Uint8Array; messageKey: SenderMessageKey }> {
-        if (chainKey.length !== 32) {
-            throw new Error('sender key chainKey must be 32 bytes')
-        }
-
-        const hmacKey = await webcrypto.subtle.importKey(
-            'raw',
-            chainKey,
-            { name: 'HMAC', hash: 'SHA-256' },
-            false,
-            ['sign']
-        )
-        const messageInputKey = toBytesView(
-            await webcrypto.subtle.sign('HMAC', hmacKey, MESSAGE_KEY_LABEL)
-        )
-        const nextChainKey = toBytesView(
-            await webcrypto.subtle.sign('HMAC', hmacKey, CHAIN_KEY_LABEL)
-        )
-        const messageSeed = await hkdfWithBytesInfo(messageInputKey, WHISPER_GROUP_INFO, 50)
-        return {
-            nextChainKey: nextChainKey.subarray(0, 32),
-            messageKey: {
-                iteration,
-                seed: messageSeed
-            }
-        }
-    }
-
     private async aesCbcEncryptFromSeed(
         seed: Uint8Array,
         plaintext: Uint8Array
     ): Promise<Uint8Array> {
         const { keyBytes, iv } = this.extractAesCbcParams(seed)
-        const key = await webcrypto.subtle.importKey(
-            'raw',
-            keyBytes,
-            { name: 'AES-CBC', length: 256 },
-            false,
-            ['encrypt']
-        )
-        const encrypted = await webcrypto.subtle.encrypt({ name: 'AES-CBC', iv }, key, plaintext)
-        return toBytesView(encrypted)
+        const key = await importAesCbcKey(keyBytes)
+        return aesCbcEncrypt(key, iv, plaintext)
     }
 
     private async aesCbcDecryptFromSeed(
@@ -424,15 +245,8 @@ export class SenderKeyManager {
         ciphertext: Uint8Array
     ): Promise<Uint8Array> {
         const { keyBytes, iv } = this.extractAesCbcParams(seed)
-        const key = await webcrypto.subtle.importKey(
-            'raw',
-            keyBytes,
-            { name: 'AES-CBC', length: 256 },
-            false,
-            ['decrypt']
-        )
-        const decrypted = await webcrypto.subtle.decrypt({ name: 'AES-CBC', iv }, key, ciphertext)
-        return toBytesView(decrypted)
+        const key = await importAesCbcKey(keyBytes)
+        return aesCbcDecrypt(key, iv, ciphertext)
     }
 
     private extractAesCbcParams(seed: Uint8Array): { keyBytes: Uint8Array; iv: Uint8Array } {

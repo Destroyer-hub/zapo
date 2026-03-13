@@ -2,20 +2,7 @@ import { WA_DEFAULTS, WA_NODE_TAGS, WA_XMLNS } from '@protocol/constants'
 import { SIGNAL_KEY_BUNDLE_TYPE_BYTES } from '@signal/api/constants'
 import type { PreKeyRecord, RegistrationInfo, SignedPreKeyRecord } from '@signal/types'
 import { buildIqNode } from '@transport/node/query'
-import { toBytesView } from '@util/bytes'
-
-export function intToBigEndianBytes(value: number, byteLength: number): Uint8Array {
-    if (!Number.isSafeInteger(value) || value < 0) {
-        throw new Error(`invalid integer value ${value}`)
-    }
-    const out = new Uint8Array(byteLength)
-    let current = value
-    for (let index = byteLength - 1; index >= 0; index -= 1) {
-        out[index] = current & 0xff
-        current = Math.floor(current / 256)
-    }
-    return out
-}
+import { intToBytes, toBytesView } from '@util/bytes'
 
 export function buildPreKeyUploadIq(
     registrationInfo: RegistrationInfo,
@@ -26,7 +13,7 @@ export function buildPreKeyUploadIq(
         {
             tag: WA_NODE_TAGS.REGISTRATION,
             attrs: {},
-            content: intToBigEndianBytes(registrationInfo.registrationId, 4)
+            content: intToBytes(4, registrationInfo.registrationId)
         },
         {
             tag: WA_NODE_TAGS.TYPE,
@@ -48,7 +35,7 @@ export function buildPreKeyUploadIq(
                     {
                         tag: WA_NODE_TAGS.ID,
                         attrs: {},
-                        content: intToBigEndianBytes(record.keyId, 3)
+                        content: intToBytes(3, record.keyId)
                     },
                     {
                         tag: WA_NODE_TAGS.VALUE,
@@ -65,7 +52,7 @@ export function buildPreKeyUploadIq(
                 {
                     tag: WA_NODE_TAGS.ID,
                     attrs: {},
-                    content: intToBigEndianBytes(signedPreKey.keyId, 3)
+                    content: intToBytes(3, signedPreKey.keyId)
                 },
                 {
                     tag: WA_NODE_TAGS.VALUE,

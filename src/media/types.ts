@@ -20,6 +20,7 @@ export interface WaMediaTransferClientOptions {
     readonly logger?: Logger
     readonly defaultHosts?: readonly string[]
     readonly defaultTimeoutMs?: number
+    readonly defaultMaxReadBytes?: number
     readonly defaultHeaders?: Readonly<Record<string, string>>
 }
 

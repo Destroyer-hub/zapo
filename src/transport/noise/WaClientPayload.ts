@@ -114,7 +114,7 @@ function buildCommonPayload(config: WaPayloadCommonConfig): {
     }
 }
 
-export async function buildLoginPayload(config: WaLoginPayloadConfig): Promise<Uint8Array> {
+export function buildLoginPayload(config: WaLoginPayloadConfig): Uint8Array {
     if (!Number.isSafeInteger(config.username) || config.username <= 0) {
         throw new Error('login payload requires a valid numeric username')
     }
@@ -127,9 +127,7 @@ export async function buildLoginPayload(config: WaLoginPayloadConfig): Promise<U
     }).finish()
 }
 
-export async function buildRegistrationPayload(
-    config: WaRegistrationPayloadConfig
-): Promise<Uint8Array> {
+export function buildRegistrationPayload(config: WaRegistrationPayloadConfig): Uint8Array {
     const registrationId = config.registrationInfo.registrationId
     const signedPreKeyId = config.signedPreKey.keyId
     if (!Number.isSafeInteger(registrationId) || registrationId <= 0) {

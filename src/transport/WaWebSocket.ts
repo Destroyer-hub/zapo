@@ -20,6 +20,8 @@ interface PendingSocket {
     settled: boolean
 }
 
+type SocketRuntime = 'browser' | 'node'
+
 function resolveWebSocketConstructor(): RawWebSocketConstructor {
     const ctor = (globalThis as typeof globalThis & { WebSocket?: RawWebSocketConstructor })
         .WebSocket
@@ -40,6 +42,22 @@ function resolveSocketUrls(config: WaSocketConfig): readonly string[] {
     return WA_DEFAULTS.CHAT_SOCKET_URLS
 }
 
+function resolveSocketRuntime(): SocketRuntime {
+    const maybeNodeProcess = (
+        globalThis as typeof globalThis & {
+            process?: {
+                versions?: {
+                    node?: string
+                }
+            }
+        }
+    ).process
+    if (typeof maybeNodeProcess?.versions?.node === 'string') {
+        return 'node'
+    }
+    return 'browser'
+}
+
 export class WaWebSocket {
     private readonly config: Readonly<
         Required<Pick<WaSocketConfig, 'timeoutIntervalMs'>> &
@@ -48,6 +66,7 @@ export class WaWebSocket {
     private readonly socketUrls: readonly string[]
     private readonly logger: Logger
     private readonly webSocketCtor: RawWebSocketConstructor
+    private readonly socketRuntime: SocketRuntime
     private readonly connectingSockets: Set<RawWebSocket>
     private handlers: WaSocketHandlers
     private socket: RawWebSocket | null
@@ -61,6 +80,7 @@ export class WaWebSocket {
         this.socketUrls = resolveSocketUrls(config)
         this.logger = logger
         this.webSocketCtor = resolveWebSocketConstructor()
+        this.socketRuntime = resolveSocketRuntime()
         this.connectingSockets = new Set<RawWebSocket>()
         this.handlers = {}
         this.socket = null
@@ -423,17 +443,14 @@ export class WaWebSocket {
     }
 
     private createRawSocket(url: string): RawWebSocket {
-        const ctor = this.webSocketCtor as unknown as {
-            new (
-                url: string,
-                protocols?: string | readonly string[],
-                options?: { headers?: Readonly<Record<string, string>> }
-            ): RawWebSocket
-        }
         const headers = this.config.headers
-        if (headers && Object.keys(headers).length > 0) {
-            return new ctor(url, this.config.protocols, { headers })
+        if (
+            this.socketRuntime === 'node' &&
+            headers &&
+            Object.keys(headers).length > 0
+        ) {
+            return new this.webSocketCtor(url, this.config.protocols, { headers })
         }
-        return new ctor(url, this.config.protocols)
+        return new this.webSocketCtor(url, this.config.protocols)
     }
 }

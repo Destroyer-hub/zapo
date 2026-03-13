@@ -20,24 +20,18 @@ import type {
     SignalSessionRecord,
     SignedPreKeyRecord
 } from '@signal/types'
-import { openSqliteConnection, type WaSqliteConnection } from '@store/providers/sqlite/connection'
-import { ensureSqliteMigrations } from '@store/providers/sqlite/migrations'
+import type { WaSignalStore as WaSignalStoreContract } from '@store/contracts/signal.store'
+import { BaseSqliteStore } from '@store/providers/sqlite/BaseSqliteStore'
+import type { WaSqliteConnection } from '@store/providers/sqlite/connection'
 import type { WaSqliteStorageOptions } from '@store/types'
 import { asNumber, toBoolOrUndef } from '@util/coercion'
 
-export class WaSignalStore {
-    private readonly options: WaSqliteStorageOptions
-    private connectionPromise: Promise<WaSqliteConnection> | null
-
+export class WaSignalSqliteStore
+    extends BaseSqliteStore
+    implements WaSignalStoreContract
+{
     public constructor(options: WaSqliteStorageOptions) {
-        if (!options.path || options.path.trim().length === 0) {
-            throw new Error('storage.sqlite.path must be a non-empty string')
-        }
-        if (!options.sessionId || options.sessionId.trim().length === 0) {
-            throw new Error('storage.sqlite.sessionId must be a non-empty string')
-        }
-        this.options = options
-        this.connectionPromise = null
+        super(options, ['signal'])
     }
 
     public async getRegistrationInfo(): Promise<RegistrationInfo | null> {
@@ -385,12 +379,4 @@ export class WaSignalStore {
         }
     }
 
-    private async getConnection(): Promise<WaSqliteConnection> {
-        if (!this.connectionPromise) {
-            this.connectionPromise = openSqliteConnection(this.options).then((connection) => {
-                return ensureSqliteMigrations(connection, ['signal']).then(() => connection)
-            })
-        }
-        return this.connectionPromise
-    }
 }

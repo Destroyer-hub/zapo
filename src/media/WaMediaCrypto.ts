@@ -35,8 +35,8 @@ import { WA_APP_STATE_KEY_TYPES, getWaMediaHkdfInfo } from '@protocol/constants'
 import {
     concatBytes,
     EMPTY_BYTES,
-    toBufferChunk,
-    toBufferView,
+    readAllBytes,
+    toChunkBytes,
     toBytesView,
     uint8Equal,
     uint8TimingSafeEqual
@@ -145,7 +145,7 @@ export class WaMediaCrypto {
         options: WaMediaDecryptReadableOptions
     ): Promise<WaMediaDecryptionResult> {
         const decrypted = await WaMediaCrypto.decryptReadable(encrypted, options)
-        const plaintext = await readAll(decrypted.plaintext)
+        const plaintext = await readAllBytes(decrypted.plaintext)
         const metadata = await decrypted.metadata
         return {
             plaintext,
@@ -186,7 +186,7 @@ async function pumpEncryption(
     hmac.update(keys.iv)
     try {
         for await (const chunk of plaintext) {
-            const plainChunk = toBufferChunk(chunk)
+            const plainChunk = toChunkBytes(chunk)
             if (plainChunk.byteLength === 0) {
                 continue
             }
@@ -237,13 +237,12 @@ async function pumpDecryption(
     try {
         let trailing: Uint8Array = EMPTY_BYTES
         for await (const chunk of encrypted) {
-            const bytes = toBufferChunk(chunk)
+            const bytes = toChunkBytes(chunk)
             if (bytes.byteLength === 0) {
                 continue
             }
             encHash.update(bytes)
-            const merged =
-                trailing.byteLength === 0 ? bytes : Buffer.concat([toBufferView(trailing), bytes])
+            const merged = trailing.byteLength === 0 ? bytes : concatBytes([trailing, bytes])
             if (merged.byteLength <= HMAC_TRUNCATED_SIZE) {
                 trailing = merged
                 continue
@@ -295,31 +294,6 @@ async function pumpDecryption(
     }
 }
 
-async function readAll(stream: Readable): Promise<Uint8Array> {
-    const chunks: Uint8Array[] = []
-    let total = 0
-    for await (const chunk of stream) {
-        const bytes = toBufferChunk(chunk)
-        chunks.push(bytes)
-        total += bytes.byteLength
-    }
-
-    if (total === 0) {
-        return EMPTY_BYTES
-    }
-    if (chunks.length === 1) {
-        return chunks[0]
-    }
-
-    const merged = new Uint8Array(total)
-    let offset = 0
-    for (const chunk of chunks) {
-        merged.set(chunk, offset)
-        offset += chunk.byteLength
-    }
-    return merged
-}
-
 function mediaTypeToHkdfInfo(mediaType: MediaCryptoType): string {
     if (mediaType === 'ptv') {
         return getWaMediaHkdfInfo('video')
@@ -330,7 +304,7 @@ function mediaTypeToHkdfInfo(mediaType: MediaCryptoType): string {
     return getWaMediaHkdfInfo(mediaType)
 }
 
-async function writeChunk(stream: PassThrough, chunk: Buffer): Promise<void> {
+async function writeChunk(stream: PassThrough, chunk: Uint8Array): Promise<void> {
     if (chunk.byteLength === 0) {
         return
     }

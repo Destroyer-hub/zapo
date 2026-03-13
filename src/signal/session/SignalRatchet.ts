@@ -1,6 +1,7 @@
-import { webcrypto } from 'node:crypto'
-
+import type { CryptoKey } from '@crypto'
 import {
+    aesCbcDecrypt,
+    aesCbcEncrypt,
     hkdf,
     hkdfSplit,
     importAesCbcKey,
@@ -14,7 +15,7 @@ import {
     CHAIN_KEY_LABEL,
     FUTURE_MESSAGES_MAX,
     MAX_UNUSED_KEYS,
-    MSG_KEY_LABEL,
+    MESSAGE_KEY_LABEL,
     SIGNAL_MAC_SIZE,
     SIGNAL_VERSION
 } from '@signal/constants'
@@ -38,7 +39,10 @@ import type {
     SignalSerializedKeyPair,
     SignalSessionRecord
 } from '@signal/types'
-import { cloneBytes, concatBytes, removeAt, toBytesView, uint8Equal } from '@util/bytes'
+import { concatBytes, removeAt, uint8Equal } from '@util/bytes'
+import { toError } from '@util/primitives'
+
+const MAX_TRACKED_RECV_CHAINS = 4
 
 export interface DecryptOutcome {
     readonly updatedSession: SignalSessionRecord
@@ -50,15 +54,20 @@ export interface DecryptOutcome {
     } | null
 }
 
+interface DerivedChainState {
+    readonly chainKey: Uint8Array
+    readonly hmacKey: CryptoKey
+}
+
 export function splitMsgKey(index: number, bytes: Uint8Array): SignalMessageKey {
     if (bytes.length < 80) {
         throw new Error('invalid message key length')
     }
     return {
         index,
-        cipherKey: cloneBytes(bytes.subarray(0, 32)),
-        macKey: cloneBytes(bytes.subarray(32, 64)),
-        iv: cloneBytes(bytes.subarray(64, 80))
+        cipherKey: bytes.subarray(0, 32),
+        macKey: bytes.subarray(32, 64),
+        iv: bytes.subarray(64, 80)
     }
 }
 
@@ -66,16 +75,11 @@ export async function deriveMsgKey(
     index: number,
     chainKey: Uint8Array
 ): Promise<{ readonly nextChainKey: Uint8Array; readonly messageKey: SignalMessageKey }> {
-    const hmacKey = await importHmacKey(chainKey)
-    const [messageInputKey, nextChainRaw] = await Promise.all([
-        hmacSign(hmacKey, MSG_KEY_LABEL),
-        hmacSign(hmacKey, CHAIN_KEY_LABEL)
-    ])
-    const expanded = await hkdf(cloneBytes(messageInputKey), null, 'WhisperMessageKeys', 80)
-    const messageKey = splitMsgKey(index, expanded)
+    const state = await createDerivedChainState(chainKey)
+    const derived = await deriveMsgKeyFromState(index, state)
     return {
-        nextChainKey: cloneBytes(nextChainRaw.subarray(0, 32)),
-        messageKey
+        nextChainKey: derived.nextState.chainKey,
+        messageKey: derived.messageKey
     }
 }
 
@@ -85,7 +89,7 @@ export async function calculateRatchet(
     remoteRatchetPubKey: Uint8Array
 ): Promise<{ readonly rootKey: Uint8Array; readonly chainKey: Uint8Array }> {
     const sharedSecret = await ecdh(localRatchet.privKey, remoteRatchetPubKey)
-    const [nextRootKey, chainKey] = await hkdfSplit(sharedSecret, 'WhisperRatchet', rootKey)
+    const [nextRootKey, chainKey] = await hkdfSplit(sharedSecret, rootKey, 'WhisperRatchet')
     return {
         rootKey: nextRootKey,
         chainKey
@@ -119,9 +123,10 @@ export async function selectMessageKey(
         }
     }
 
-    const first = await deriveMsgKey(chain.nextMsgIndex, chain.chainKey)
+    let chainState = await createDerivedChainState(chain.chainKey)
+    const first = await deriveMsgKeyFromState(chain.nextMsgIndex, chainState)
     let currentMessageKey = first.messageKey
-    let nextChainKey = first.nextChainKey
+    chainState = first.nextState
     let nextUnused = unused.slice()
 
     if (delta > 0) {
@@ -136,9 +141,9 @@ export async function selectMessageKey(
             } else {
                 nextUnused.push(currentMessageKey)
             }
-            const derived = await deriveMsgKey(counter, nextChainKey)
+            const derived = await deriveMsgKeyFromState(counter, chainState)
             currentMessageKey = derived.messageKey
-            nextChainKey = derived.nextChainKey
+            chainState = derived.nextState
         }
     }
 
@@ -147,9 +152,40 @@ export async function selectMessageKey(
         updatedChain: makeRecvChain(
             chain.ratchetPubKey,
             targetCounter + 1,
-            nextChainKey,
+            chainState.chainKey,
             nextUnused
         )
+    }
+}
+
+async function createDerivedChainState(chainKey: Uint8Array): Promise<DerivedChainState> {
+    return {
+        chainKey,
+        hmacKey: await importHmacKey(chainKey)
+    }
+}
+
+async function deriveMsgKeyFromState(
+    index: number,
+    state: DerivedChainState
+): Promise<{ readonly nextState: DerivedChainState; readonly messageKey: SignalMessageKey }> {
+    const nextChainRawPromise = hmacSign(state.hmacKey, CHAIN_KEY_LABEL)
+    const messageInputKeyPromise = hmacSign(state.hmacKey, MESSAGE_KEY_LABEL)
+    const [nextChainRaw, messageInputKey] = await Promise.all([
+        nextChainRawPromise,
+        messageInputKeyPromise
+    ])
+    const nextChainKey = nextChainRaw.subarray(0, 32)
+    const [nextHmacKey, expanded] = await Promise.all([
+        importHmacKey(nextChainKey),
+        hkdf(messageInputKey, null, 'WhisperMessageKeys', 80)
+    ])
+    return {
+        nextState: {
+            chainKey: nextChainKey,
+            hmacKey: nextHmacKey
+        },
+        messageKey: splitMsgKey(index, expanded)
     }
 }
 
@@ -161,11 +197,11 @@ export async function encryptMsg(
         session.sendChain.nextMsgIndex,
         session.sendChain.chainKey
     )
-    const cipherKey = await importAesCbcKey(messageKey.cipherKey)
-    const macKey = await importHmacKey(messageKey.macKey)
-    const ciphertext = toBytesView(
-        await webcrypto.subtle.encrypt({ name: 'AES-CBC', iv: messageKey.iv }, cipherKey, plaintext)
-    )
+    const [cipherKey, macKey] = await Promise.all([
+        importAesCbcKey(messageKey.cipherKey),
+        importHmacKey(messageKey.macKey)
+    ])
+    const ciphertext = await aesCbcEncrypt(cipherKey, messageKey.iv, plaintext)
 
     const signalPayload = proto.SignalMessage.encode({
         ratchetKey: session.sendChain.ratchetKey.pubKey,
@@ -212,7 +248,8 @@ export async function decryptMsg(
     decryptMsgFromSessionFn: (
         session: SignalSessionRecord,
         message: ParsedSignalMessage | ParsedPreKeySignalMessage
-    ) => Promise<readonly [SignalSessionRecord, Uint8Array]>
+    ) => Promise<readonly [SignalSessionRecord, Uint8Array]>,
+    onPrevSessionDecryptError?: (error: Error, previousSessionIndex: number) => void
 ): Promise<DecryptOutcome> {
     if (!session) {
         throw new Error('signal session not found')
@@ -247,7 +284,8 @@ export async function decryptMsg(
                         usedPreKey: null
                     }
                 }
-            } catch {
+            } catch (prevError) {
+                onPrevSessionDecryptError?.(toError(prevError), i)
                 continue
             }
         }
@@ -283,7 +321,7 @@ export async function decryptMsgFromSession(
             newSendRatchet,
             ratchetPubKey
         )
-        const nextRecvChains = session.recvChains.slice(-4)
+        const nextRecvChains = session.recvChains.slice(-MAX_TRACKED_RECV_CHAINS)
         nextRecvChains.push(selected.updatedChain)
         updatedSession = ratchetSession(
             session,
@@ -299,8 +337,10 @@ export async function decryptMsgFromSession(
         updatedSession = updateChains(session, nextRecvChains, session.sendChain)
     }
 
-    const cipherKey = await importAesCbcKey(selectedMessageKey.cipherKey)
-    const macKey = await importHmacKey(selectedMessageKey.macKey)
+    const [cipherKey, macKey] = await Promise.all([
+        importAesCbcKey(selectedMessageKey.cipherKey),
+        importHmacKey(selectedMessageKey.macKey)
+    ])
     const payloadWithoutMac = message.versionContentMac.subarray(
         0,
         message.versionContentMac.length - SIGNAL_MAC_SIZE
@@ -318,12 +358,6 @@ export async function decryptMsgFromSession(
         throw new Error('invalid message mac')
     }
 
-    const plaintext = toBytesView(
-        await webcrypto.subtle.decrypt(
-            { name: 'AES-CBC', iv: selectedMessageKey.iv },
-            cipherKey,
-            message.ciphertext
-        )
-    )
+    const plaintext = await aesCbcDecrypt(cipherKey, selectedMessageKey.iv, message.ciphertext)
     return [updatedSession, plaintext]
 }

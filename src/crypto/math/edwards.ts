@@ -3,7 +3,7 @@ import { bigIntToBytesLE } from '@crypto/math/le'
 import { mod, modGroup, modInv } from '@crypto/math/mod'
 import type { ExtendedPoint } from '@crypto/math/types'
 
-export function addPoint(a: ExtendedPoint, b: ExtendedPoint): ExtendedPoint {
+function addPoint(a: ExtendedPoint, b: ExtendedPoint): ExtendedPoint {
     const y1MinusX1 = mod(a.y - a.x)
     const y2MinusX2 = mod(b.y - b.x)
     const y1PlusX1 = mod(a.y + a.x)
@@ -24,7 +24,7 @@ export function addPoint(a: ExtendedPoint, b: ExtendedPoint): ExtendedPoint {
     }
 }
 
-export function doublePoint(point: ExtendedPoint): ExtendedPoint {
+function doublePoint(point: ExtendedPoint): ExtendedPoint {
     const aTerm = mod(point.x * point.x)
     const bTerm = mod(point.y * point.y)
     const cTerm = mod(2n * point.z * point.z)

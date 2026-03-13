@@ -14,113 +14,110 @@ interface WaStreamControlCoordinatorOptions {
     readonly connect: () => Promise<void>
 }
 
-export class WaStreamControlCoordinator {
-    private readonly logger: Logger
-    private readonly getComms: () => WaComms | null
-    private readonly clearPendingQueries: (error: Error) => void
-    private readonly clearMediaConnCache: () => void
-    private readonly disconnect: () => Promise<void>
-    private readonly clearStoredCredentials: () => Promise<void>
-    private readonly connect: () => Promise<void>
-    private lifecyclePromise: Promise<void> | null
+export interface WaStreamControlHandler {
+    readonly handleStreamControlResult: (result: WaStreamControlNodeResult) => Promise<void>
+}
 
-    public constructor(options: WaStreamControlCoordinatorOptions) {
-        this.logger = options.logger
-        this.getComms = options.getComms
-        this.clearPendingQueries = options.clearPendingQueries
-        this.clearMediaConnCache = options.clearMediaConnCache
-        this.disconnect = options.disconnect
-        this.clearStoredCredentials = options.clearStoredCredentials
-        this.connect = options.connect
-        this.lifecyclePromise = null
-    }
+export function createStreamControlHandler(
+    options: WaStreamControlCoordinatorOptions
+): WaStreamControlHandler {
+    const {
+        logger,
+        getComms,
+        clearPendingQueries,
+        clearMediaConnCache,
+        disconnect,
+        clearStoredCredentials,
+        connect
+    } = options
 
-    public async handleStreamControlResult(result: WaStreamControlNodeResult): Promise<void> {
-        await handleParsedStreamControl(result, {
-            logger: this.logger,
-            forceLoginDueToStreamError: async (code) => this.forceLoginDueToStreamError(code),
-            logoutDueToStreamError: async (reason, shouldRestartBackend) =>
-                this.logoutDueToStreamError(reason, shouldRestartBackend),
-            disconnectDueToStreamError: async (reason) => this.disconnectDueToStreamError(reason),
-            resumeSocketDueToStreamError: async (reason) =>
-                this.resumeSocketDueToStreamError(reason)
-        })
-    }
+    let lifecyclePromise: Promise<void> | null = null
 
-    private async resumeSocketDueToStreamError(reason: string): Promise<void> {
-        const comms = this.getComms()
-        if (!comms) {
-            return
+    const runStreamControlLifecycle = (reason: string, action: () => Promise<void>): Promise<void> => {
+        if (lifecyclePromise) {
+            logger.debug('stream-control lifecycle already running', { reason })
+            return lifecyclePromise
         }
-        this.logger.info('resuming socket due to stream control node', { reason })
-        this.clearPendingQueries(new Error(`socket resume requested by ${reason}`))
-        this.clearMediaConnCache()
+        lifecyclePromise = action().finally(() => {
+            lifecyclePromise = null
+        })
+        return lifecyclePromise
+    }
+
+    const restartBackendAfterStreamControl = async (reason: string): Promise<void> => {
+        logger.info('restarting backend after stream control', { reason })
         try {
-            await comms.closeSocketAndResume()
+            await connect()
         } catch (error) {
-            this.logger.warn('failed to resume socket for stream control node', {
+            logger.warn('failed to restart backend after stream control', {
                 reason,
                 message: toError(error).message
             })
         }
     }
 
-    private async forceLoginDueToStreamError(code: number): Promise<void> {
-        await this.runStreamControlLifecycle(`stream_error_code_${code}`, async () => {
-            this.logger.warn('received forced login stream error; starting login lifecycle', {
+    const resumeSocketDueToStreamError = async (reason: string): Promise<void> => {
+        const comms = getComms()
+        if (!comms) {
+            return
+        }
+        logger.info('resuming socket due to stream control node', { reason })
+        clearPendingQueries(new Error(`socket resume requested by ${reason}`))
+        clearMediaConnCache()
+        try {
+            await comms.closeSocketAndResume()
+        } catch (error) {
+            logger.warn('failed to resume socket for stream control node', {
+                reason,
+                message: toError(error).message
+            })
+        }
+    }
+
+    const forceLoginDueToStreamError = async (code: number): Promise<void> => {
+        await runStreamControlLifecycle(`stream_error_code_${code}`, async () => {
+            logger.warn('received forced login stream error; starting login lifecycle', {
                 code
             })
-            await this.disconnect()
-            await this.clearStoredCredentials()
-            await this.restartBackendAfterStreamControl(`stream_error_code_${code}`)
+            await disconnect()
+            await clearStoredCredentials()
+            await restartBackendAfterStreamControl(`stream_error_code_${code}`)
         })
     }
 
-    private async disconnectDueToStreamError(reason: string): Promise<void> {
-        this.logger.warn('disconnecting due to stream control node', { reason })
-        await this.disconnect()
+    const disconnectDueToStreamError = async (reason: string): Promise<void> => {
+        await runStreamControlLifecycle(reason, async () => {
+            logger.warn('disconnecting due to stream control node', { reason })
+            await disconnect()
+        })
     }
 
-    private async logoutDueToStreamError(
+    const logoutDueToStreamError = async (
         reason: string,
         shouldRestartBackend: boolean
-    ): Promise<void> {
-        await this.runStreamControlLifecycle(reason, async () => {
-            this.logger.warn('logging out due to stream control node', {
+    ): Promise<void> => {
+        await runStreamControlLifecycle(reason, async () => {
+            logger.warn('logging out due to stream control node', {
                 reason,
                 shouldRestartBackend
             })
-            await this.disconnect()
-            await this.clearStoredCredentials()
+            await disconnect()
+            await clearStoredCredentials()
             if (shouldRestartBackend) {
-                await this.restartBackendAfterStreamControl(reason)
+                await restartBackendAfterStreamControl(reason)
             }
         })
     }
 
-    private async runStreamControlLifecycle(
-        reason: string,
-        action: () => Promise<void>
-    ): Promise<void> {
-        if (this.lifecyclePromise) {
-            this.logger.debug('stream-control lifecycle already running', { reason })
-            return this.lifecyclePromise
-        }
-        this.lifecyclePromise = action().finally(() => {
-            this.lifecyclePromise = null
-        })
-        return this.lifecyclePromise
-    }
-
-    private async restartBackendAfterStreamControl(reason: string): Promise<void> {
-        this.logger.info('restarting backend after stream control', { reason })
-        try {
-            await this.connect()
-        } catch (error) {
-            this.logger.warn('failed to restart backend after stream control', {
-                reason,
-                message: toError(error).message
+    return {
+        handleStreamControlResult: async (result: WaStreamControlNodeResult) =>
+            handleParsedStreamControl(result, {
+                logger,
+                forceLoginDueToStreamError,
+                logoutDueToStreamError,
+                disconnectDueToStreamError,
+                resumeSocketDueToStreamError
             })
-        }
     }
 }
+

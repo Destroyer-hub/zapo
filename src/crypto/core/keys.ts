@@ -69,7 +69,7 @@ export function readVersionedContent(
     }
 
     const bodyEnd = versionContent.length - suffixLength
-    if (bodyEnd < 1) {
+    if (bodyEnd <= 1) {
         throw new Error('invalid signal content length')
     }
     return versionContent.subarray(1, bodyEnd)

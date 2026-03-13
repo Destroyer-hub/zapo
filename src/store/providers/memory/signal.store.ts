@@ -1,4 +1,3 @@
-import { WA_DEFAULTS } from '@protocol/constants'
 import type {
     PreKeyRecord,
     RegistrationInfo,
@@ -6,8 +5,18 @@ import type {
     SignalSessionRecord,
     SignedPreKeyRecord
 } from '@signal/types'
+import type { WaSignalStore as WaSignalStoreContract } from '@store/contracts/signal.store'
+import { setBoundedMapEntry } from '@util/collections'
+import { readPositiveLimit } from '@util/env'
+import { signalAddressKey } from '@util/signal-address'
 
-export class WaSignalStore {
+const DEFAULT_SIGNAL_STORE_LIMITS = Object.freeze({
+    preKeys: 4_096,
+    sessions: 8_192,
+    remoteIdentities: 8_192
+})
+
+export class WaSignalMemoryStore implements WaSignalStoreContract {
     private registrationInfo: RegistrationInfo | null
     private signedPreKey: SignedPreKeyRecord | null
     private readonly preKeys: Map<number, PreKeyRecord>
@@ -16,6 +25,9 @@ export class WaSignalStore {
     private readonly signalSessions: Map<string, SignalSessionRecord>
     private readonly remoteIdentities: Map<string, Uint8Array>
     private nextPreKeyId: number
+    private readonly maxPreKeys: number
+    private readonly maxSessions: number
+    private readonly maxRemoteIdentities: number
 
     public constructor() {
         this.registrationInfo = null
@@ -26,6 +38,18 @@ export class WaSignalStore {
         this.signalSessions = new Map()
         this.remoteIdentities = new Map()
         this.nextPreKeyId = 1
+        this.maxPreKeys = readPositiveLimit(
+            'WA_SIGNAL_MEMORY_STORE_MAX_PREKEYS',
+            DEFAULT_SIGNAL_STORE_LIMITS.preKeys
+        )
+        this.maxSessions = readPositiveLimit(
+            'WA_SIGNAL_MEMORY_STORE_MAX_SESSIONS',
+            DEFAULT_SIGNAL_STORE_LIMITS.sessions
+        )
+        this.maxRemoteIdentities = readPositiveLimit(
+            'WA_SIGNAL_MEMORY_STORE_MAX_REMOTE_IDENTITIES',
+            DEFAULT_SIGNAL_STORE_LIMITS.remoteIdentities
+        )
     }
 
     public async getRegistrationInfo(): Promise<RegistrationInfo | null> {
@@ -52,7 +76,9 @@ export class WaSignalStore {
     }
 
     public async putPreKey(record: PreKeyRecord): Promise<void> {
-        this.preKeys.set(record.keyId, record)
+        setBoundedMapEntry(this.preKeys, record.keyId, record, this.maxPreKeys, (keyId) => {
+            this.uploadedPreKeys.delete(keyId)
+        })
         if (record.keyId >= this.nextPreKeyId) {
             this.nextPreKeyId = record.keyId + 1
         }
@@ -85,7 +111,9 @@ export class WaSignalStore {
 
         while (available.length < count) {
             const record = await generator(this.nextPreKeyId++)
-            this.preKeys.set(record.keyId, record)
+            setBoundedMapEntry(this.preKeys, record.keyId, record, this.maxPreKeys, (keyId) => {
+                this.uploadedPreKeys.delete(keyId)
+            })
             available.push(record)
         }
         return available
@@ -118,7 +146,7 @@ export class WaSignalStore {
         }
         for (const candidate of this.preKeys.keys()) {
             if (candidate <= keyId) {
-                this.uploadedPreKeys.add(candidate)
+                this.addUploadedPreKey(candidate)
             }
         }
     }
@@ -132,27 +160,42 @@ export class WaSignalStore {
     }
 
     public async getSession(address: SignalAddress): Promise<SignalSessionRecord | null> {
-        return this.signalSessions.get(this.addressKey(address)) ?? null
+        return this.signalSessions.get(signalAddressKey(address)) ?? null
     }
 
     public async setSession(address: SignalAddress, session: SignalSessionRecord): Promise<void> {
-        this.signalSessions.set(this.addressKey(address), session)
+        setBoundedMapEntry(this.signalSessions, signalAddressKey(address), session, this.maxSessions)
     }
 
     public async deleteSession(address: SignalAddress): Promise<void> {
-        this.signalSessions.delete(this.addressKey(address))
+        this.signalSessions.delete(signalAddressKey(address))
     }
 
     public async getRemoteIdentity(address: SignalAddress): Promise<Uint8Array | null> {
-        return this.remoteIdentities.get(this.addressKey(address)) ?? null
+        return this.remoteIdentities.get(signalAddressKey(address)) ?? null
     }
 
     public async setRemoteIdentity(address: SignalAddress, identityKey: Uint8Array): Promise<void> {
-        this.remoteIdentities.set(this.addressKey(address), identityKey)
+        setBoundedMapEntry(
+            this.remoteIdentities,
+            signalAddressKey(address),
+            identityKey,
+            this.maxRemoteIdentities
+        )
     }
 
-    private addressKey(address: SignalAddress): string {
-        const server = address.server ?? WA_DEFAULTS.HOST_DOMAIN
-        return `${address.user}|${server}|${address.device}`
+    private addUploadedPreKey(keyId: number): void {
+        if (this.uploadedPreKeys.has(keyId)) {
+            this.uploadedPreKeys.delete(keyId)
+        }
+        this.uploadedPreKeys.add(keyId)
+        while (this.uploadedPreKeys.size > this.maxPreKeys) {
+            const oldest = this.uploadedPreKeys.values().next().value
+            if (oldest === undefined) {
+                break
+            }
+            this.uploadedPreKeys.delete(oldest)
+        }
     }
+
 }

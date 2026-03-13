@@ -30,8 +30,8 @@ export async function hkdf(
  */
 export async function hkdfSplit(
     ikm: Uint8Array,
-    info: string,
-    salt: Uint8Array | null
+    salt: Uint8Array | null,
+    info: string
 ): Promise<readonly [Uint8Array, Uint8Array]> {
     const out = await hkdf(ikm, salt, info, 64)
     return [out.subarray(0, 32), out.subarray(32, 64)]

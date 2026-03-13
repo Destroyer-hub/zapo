@@ -2,7 +2,6 @@ import { WA_MESSAGE_TAGS, WA_NODE_TAGS } from '@protocol/constants'
 import { RETRY_RECEIPT_VERSION } from '@retry/constants'
 import type { WaRetryKeyBundle } from '@retry/types'
 import { SIGNAL_KEY_BUNDLE_TYPE_BYTES } from '@signal/api/constants'
-import { buildInboundRetryReceiptAckNode } from '@transport/node/builders/message'
 import type { BinaryNode } from '@transport/types'
 import { intToBytes } from '@util/bytes'
 
@@ -136,8 +135,4 @@ export function buildRetryReceiptNode(input: BuildRetryReceiptNodeInput): Binary
         attrs,
         content
     }
-}
-
-export function buildRetryAckNode(receiptNode: BinaryNode): BinaryNode {
-    return buildInboundRetryReceiptAckNode(receiptNode)
 }

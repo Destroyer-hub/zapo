@@ -13,25 +13,14 @@ export interface WaSqliteStorageOptions {
     readonly pragmas?: Readonly<Record<string, string | number>>
 }
 
-export interface WaStoreCodec<T> {
-    serialize(value: T): Uint8Array
-    deserialize(raw: Uint8Array): T
-}
-
-export type WaStoreCodecRegistry = Readonly<Record<string, WaStoreCodec<unknown>>>
-
-export interface WaStorageOptions {
-    readonly sqlite?: WaSqliteStorageOptions
-    readonly codecs?: Partial<WaStoreCodecRegistry>
-}
-
-export interface WaStoreSession {
+export interface WaCoreStoreSession {
     readonly auth: WaAuthStore
     readonly signal: WaSignalStore
     readonly senderKey: WaSenderKeyStore
     readonly appState: WaAppStateStore
     readonly retry: WaRetryStore
 }
+export type WaStoreSession = WaCoreStoreSession
 
 export interface WaStore {
     session(sessionId: string): WaStoreSession

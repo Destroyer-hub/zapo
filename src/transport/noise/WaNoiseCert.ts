@@ -1,11 +1,9 @@
-import { webcrypto } from 'node:crypto'
-
-import { toSerializedPubKey } from '@crypto/core/keys'
-import { montgomeryToEdwardsPubKey } from '@crypto/curves/X25519'
+import { ed25519VerifyRaw, toSerializedPubKey } from '@crypto'
+import { montgomeryToEdwardsPublic } from '@crypto/curves/X25519'
 import { proto } from '@proto'
 import { ROOT_CA_PUBLIC_KEY_HEX, ROOT_CA_SERIAL } from '@transport/noise/constants'
 import { decodeProtoBytes } from '@util/base64'
-import { toBytesView, uint8Equal } from '@util/bytes'
+import { hexToBytes, uint8Equal } from '@util/bytes'
 import { toSafeNumber } from '@util/primitives'
 
 interface ParsedNoiseCertificate {
@@ -33,15 +31,8 @@ async function verifySignalVariant(
     const signBit = lastByte & 0x80
     signature[63] = lastByte & 0x7f
 
-    const edwardsPublicKey = montgomeryToEdwardsPubKey(publicKey.subarray(1), signBit)
-    const cryptoKey = await webcrypto.subtle.importKey(
-        'raw',
-        edwardsPublicKey,
-        { name: 'Ed25519' },
-        false,
-        ['verify']
-    )
-    return webcrypto.subtle.verify('Ed25519', cryptoKey, signature, message)
+    const edwardsPublicKey = montgomeryToEdwardsPublic(publicKey.subarray(1), signBit)
+    return ed25519VerifyRaw(edwardsPublicKey, signature, message)
 }
 
 function parseNoiseCertificate(
@@ -72,7 +63,7 @@ function parseNoiseCertificate(
 }
 
 function rootPublicKeySerialized(): Uint8Array {
-    const raw = toBytesView(Buffer.from(ROOT_CA_PUBLIC_KEY_HEX, 'hex'))
+    const raw = hexToBytes(ROOT_CA_PUBLIC_KEY_HEX)
     return toSerializedPubKey(raw)
 }
 

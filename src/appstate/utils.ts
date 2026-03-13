@@ -1,12 +1,12 @@
-import type { AppStateCollectionName } from '@appstate/types'
+import type { AppStateCollectionName, WaAppStateSyncKey } from '@appstate/types'
 import type { WaMediaTransferClient } from '@media/WaMediaTransferClient'
 import type { Proto } from '@proto'
 import { WA_APP_STATE_COLLECTIONS, WA_APP_STATE_KEY_TYPES } from '@protocol/constants'
 import { decodeProtoBytes } from '@util/base64'
-import { toBufferView } from '@util/bytes'
+import { bytesToHex } from '@util/bytes'
 
 export function keyIdToHex(keyId: Uint8Array): string {
-    return toBufferView(keyId).toString('hex')
+    return bytesToHex(keyId)
 }
 
 export function parseCollectionName(value: string | undefined): AppStateCollectionName | null {
@@ -21,9 +21,9 @@ export function parseCollectionName(value: string | undefined): AppStateCollecti
     return null
 }
 
-export function keyDeviceId(keyId: Uint8Array): number {
+export function keyDeviceId(keyId: Uint8Array): number | null {
     if (keyId.byteLength < 6) {
-        return Number.MAX_SAFE_INTEGER
+        return null
     }
     return (keyId[0] << 8) | keyId[1]
 }
@@ -33,6 +33,31 @@ export function keyEpoch(keyId: Uint8Array): number {
         return -1
     }
     return new DataView(keyId.buffer, keyId.byteOffset, keyId.byteLength).getUint32(2, false)
+}
+
+export function pickActiveSyncKey(keys: Iterable<WaAppStateSyncKey>): WaAppStateSyncKey | null {
+    let active: WaAppStateSyncKey | null = null
+    for (const key of keys) {
+        if (!active) {
+            active = key
+            continue
+        }
+        const currentEpoch = keyEpoch(active.keyId)
+        const nextEpoch = keyEpoch(key.keyId)
+        if (nextEpoch > currentEpoch) {
+            active = key
+            continue
+        }
+        if (nextEpoch < currentEpoch) {
+            continue
+        }
+        const nextDeviceId = keyDeviceId(key.keyId)
+        const currentDeviceId = keyDeviceId(active.keyId)
+        if (nextDeviceId !== null && currentDeviceId !== null && nextDeviceId < currentDeviceId) {
+            active = key
+        }
+    }
+    return active
 }
 
 export function toNetworkOrder64(value: number): Uint8Array {

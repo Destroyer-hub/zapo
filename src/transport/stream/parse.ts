@@ -13,6 +13,17 @@ export type WaStreamControlNodeResult =
     | { readonly kind: 'stream_error_xml_not_well_formed' }
     | { readonly kind: 'stream_error_other' }
 
+function parseStrictUnsignedInt(value: string): number | undefined {
+    if (!/^\d+$/.test(value)) {
+        return undefined
+    }
+    const parsed = Number(value)
+    if (!Number.isSafeInteger(parsed)) {
+        return undefined
+    }
+    return parsed
+}
+
 export function parseStreamControlNode(node: BinaryNode): WaStreamControlNodeResult | null {
     if (node.tag === WA_STREAM_SIGNALING.XML_STREAM_END_TAG) {
         return {
@@ -37,8 +48,8 @@ export function parseStreamControlNode(node: BinaryNode): WaStreamControlNodeRes
 
     const codeRaw = node.attrs.code
     if (codeRaw) {
-        const code = Number.parseInt(codeRaw, 10)
-        if (Number.isFinite(code)) {
+        const code = parseStrictUnsignedInt(codeRaw)
+        if (code !== undefined) {
             return {
                 kind: 'stream_error_code',
                 code
@@ -69,11 +80,7 @@ export function parseOptionalInt(value: string | undefined): number | undefined 
     if (!value) {
         return undefined
     }
-    const parsed = Number.parseInt(value, 10)
-    if (!Number.isFinite(parsed)) {
-        return undefined
-    }
-    return parsed
+    return parseStrictUnsignedInt(value)
 }
 
 export function parseCompanionEncStatic(

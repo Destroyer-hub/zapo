@@ -41,7 +41,12 @@ export function decodeAppStateFingerprint(
     if (!bytes) {
         return undefined
     }
-    return proto.Message.AppStateSyncKeyFingerprint.decode(bytes)
+    try {
+        return proto.Message.AppStateSyncKeyFingerprint.decode(bytes)
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        throw new Error(`invalid appstate_sync_keys.fingerprint protobuf payload: ${reason}`)
+    }
 }
 
 export function decodeAppStateSyncKeys(
