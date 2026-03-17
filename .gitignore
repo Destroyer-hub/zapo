@@ -2,8 +2,7 @@ dist
 node_modules
 .auth
 example.js
-*.md
-!README.md
+AGENTS.md
 logs.txt
 deobfuscated
 coverage

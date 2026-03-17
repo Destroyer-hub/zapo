@@ -85,6 +85,10 @@
     },
     "scripts": {
         "preinstall": "node ./scripts/check-node-version.cjs",
+        "changeset": "changeset",
+        "changeset:status": "changeset status --verbose",
+        "version:packages": "changeset version",
+        "release:publish": "npm run build && changeset publish",
         "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
         "build:cjs": "tsc -p tsconfig.build.cjs.json && tsc-alias -p tsconfig.build.cjs.json",
         "build:esm": "tsc -p tsconfig.build.esm.json && tsc-alias -p tsconfig.build.esm.json",
@@ -126,6 +130,7 @@
         }
     },
     "devDependencies": {
+        "@changesets/cli": "^2.30.0",
         "@types/node": "^22.13.14",
         "@typescript-eslint/parser": "^8.56.1",
         "@vinikjkkj/eslint-config": "^1.0.0",
