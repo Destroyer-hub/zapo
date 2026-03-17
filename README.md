@@ -80,7 +80,7 @@ These principles drive implementation decisions:
 
 Runtime dependencies:
 
-- Mandatory: `protobufjs`
+- Mandatory: none
 
 Optional peer dependencies:
 
