@@ -29,12 +29,12 @@ jobs:
                       echo
 
                       if [ -n "${previous_tag}" ]; then
-                          git log "${previous_tag}..${current_tag}" --pretty=format:'- %s (%h)'
+                          git log "${previous_tag}..${current_tag}" --pretty=format:'- %s (%h) by %an'
                           echo
                           echo
                           echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${previous_tag}...${current_tag}"
                       else
-                          git log "${current_tag}" --pretty=format:'- %s (%h)'
+                          git log "${current_tag}" --pretty=format:'- %s (%h) by %an'
                           echo
                           echo
                           echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/commits/${current_tag}"
