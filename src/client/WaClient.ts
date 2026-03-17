@@ -37,13 +37,16 @@ import type {
 } from '@message/types'
 import type { WaMessageClient } from '@message/WaMessageClient'
 import { proto, type Proto } from '@proto'
-import { WA_DEFAULTS, WA_MESSAGE_TAGS } from '@protocol/constants'
+import { WA_APP_STATE_COLLECTION_STATES, WA_DEFAULTS, WA_MESSAGE_TAGS } from '@protocol/constants'
+import { normalizeDeviceJid, toUserJid } from '@protocol/jid'
 import type { WaAppStateStore } from '@store/contracts/appstate.store'
 import type { WaContactStore } from '@store/contracts/contact.store'
 import type { WaDeviceListStore } from '@store/contracts/device-list.store'
 import type { WaMessageStore } from '@store/contracts/message.store'
 import type { WaParticipantsStore } from '@store/contracts/participants.store'
 import type { WaRetryStore } from '@store/contracts/retry.store'
+import type { WaSenderKeyStore } from '@store/contracts/sender-key.store'
+import type { WaSignalStore } from '@store/contracts/signal.store'
 import type { WaThreadStore } from '@store/contracts/thread.store'
 import type { WaKeepAlive } from '@transport/keepalive/WaKeepAlive'
 import { queryWithContext as queryNodeWithContext } from '@transport/node/query'
@@ -51,6 +54,8 @@ import type { WaNodeOrchestrator } from '@transport/node/WaNodeOrchestrator'
 import type { WaNodeTransport } from '@transport/node/WaNodeTransport'
 import type { BinaryNode } from '@transport/types'
 import { WaComms } from '@transport/WaComms'
+import { decodeProtoBytes } from '@util/base64'
+import { bytesToHex } from '@util/bytes'
 import { toError } from '@util/primitives'
 
 type WaIncomingProtocolType = NonNullable<Proto.Message.IProtocolMessage['type']>
@@ -60,6 +65,8 @@ const SYNC_RELATED_PROTOCOL_TYPES = new Set<WaIncomingProtocolType>([
     proto.Message.ProtocolMessage.Type.PEER_DATA_OPERATION_REQUEST_MESSAGE,
     proto.Message.ProtocolMessage.Type.PEER_DATA_OPERATION_REQUEST_RESPONSE_MESSAGE
 ])
+const WA_APP_STATE_KEY_SHARE_WAIT_TIMEOUT_MS = 15_000
+const WA_APP_STATE_KEY_SHARE_MAX_RETRIES = 2
 
 export class WaClient extends EventEmitter {
     private readonly options!: Readonly<WaClientOptions>
@@ -70,6 +77,8 @@ export class WaClient extends EventEmitter {
     private readonly participantsStore!: WaParticipantsStore
     private readonly deviceListStore!: WaDeviceListStore
     private readonly retryStore!: WaRetryStore
+    private readonly signalStore!: WaSignalStore
+    private readonly senderKeyStore!: WaSenderKeyStore
     private readonly threadStore!: WaThreadStore
     private readonly authClient!: WaAuthClient
     private readonly nodeOrchestrator!: WaNodeOrchestrator
@@ -88,6 +97,9 @@ export class WaClient extends EventEmitter {
     private pairingReconnectPromise: Promise<void> | null = null
     private connectPromise: Promise<void> | null = null
     private readonly danglingReceipts: BinaryNode[] = []
+    private readonly appStateKeyShareWaiters = new Set<(received: boolean) => void>()
+    private appStateKeyShareVersion = 0
+    private appStateBootstrapKeyShareWaitDone = false
 
     public constructor(options: WaClientOptions, logger: Logger = new ConsoleLogger('info')) {
         super()
@@ -101,6 +113,8 @@ export class WaClient extends EventEmitter {
         this.participantsStore = base.sessionStore.participants
         this.deviceListStore = base.sessionStore.deviceList
         this.retryStore = base.sessionStore.retry
+        this.signalStore = base.sessionStore.signal
+        this.senderKeyStore = base.sessionStore.senderKey
         this.threadStore = base.sessionStore.threads
 
         const host: WaClientDependencyHost = {
@@ -257,6 +271,11 @@ export class WaClient extends EventEmitter {
             return
         }
 
+        if (protocolType === proto.Message.ProtocolMessage.Type.APP_STATE_SYNC_KEY_REQUEST) {
+            await this.handleIncomingAppStateSyncKeyRequest(event, protocolMessage)
+            return
+        }
+
         if (protocolType === proto.Message.ProtocolMessage.Type.APP_STATE_SYNC_KEY_SHARE) {
             await this.handleIncomingAppStateSyncKeyShare(event, protocolMessage)
             return
@@ -305,6 +324,26 @@ export class WaClient extends EventEmitter {
                 from: event.chatJid,
                 imported
             })
+            if (imported > 0) {
+                const hadWaiters = this.appStateKeyShareWaiters.size > 0
+                this.appStateKeyShareVersion += 1
+                this.notifyAppStateKeyShareWaiters(true)
+                if (hadWaiters) {
+                    this.logger.debug('app-state key share imported and waiters released', {
+                        id: event.stanzaId,
+                        from: event.chatJid,
+                        imported
+                    })
+                    return
+                }
+                void this.syncAppState().catch((error) => {
+                    this.logger.warn('failed to sync app-state after key share import', {
+                        id: event.stanzaId,
+                        from: event.chatJid,
+                        message: toError(error).message
+                    })
+                })
+            }
         } catch (error) {
             this.logger.warn('failed to import app-state sync key share from protocol message', {
                 id: event.stanzaId,
@@ -312,6 +351,126 @@ export class WaClient extends EventEmitter {
                 message: toError(error).message
             })
         }
+    }
+
+    private async handleIncomingAppStateSyncKeyRequest(
+        event: WaIncomingMessageEvent,
+        protocolMessage: Proto.Message.IProtocolMessage
+    ): Promise<void> {
+        const request = protocolMessage.appStateSyncKeyRequest
+        if (!request) {
+            this.logger.warn('incoming app-state key request protocol message without payload', {
+                id: event.stanzaId,
+                from: event.chatJid
+            })
+            return
+        }
+
+        const requesterRaw = event.senderJid ?? event.chatJid
+        if (!requesterRaw) {
+            this.logger.warn('incoming app-state key request missing sender jid', {
+                id: event.stanzaId
+            })
+            return
+        }
+
+        let requesterDeviceJid: string
+        try {
+            requesterDeviceJid = normalizeDeviceJid(requesterRaw)
+        } catch (error) {
+            this.logger.warn('incoming app-state key request has malformed sender jid', {
+                id: event.stanzaId,
+                from: requesterRaw,
+                message: toError(error).message
+            })
+            return
+        }
+
+        if (!this.isOwnAccountDeviceJid(requesterDeviceJid)) {
+            this.logger.warn('incoming app-state key request ignored: sender is not own account', {
+                id: event.stanzaId,
+                from: requesterDeviceJid
+            })
+            return
+        }
+
+        const requestedKeyIds = this.extractAppStateSyncKeyRequestIds(request)
+        if (requestedKeyIds.length === 0) {
+            this.logger.warn('incoming app-state key request has no valid key ids', {
+                id: event.stanzaId,
+                from: requesterDeviceJid
+            })
+            return
+        }
+
+        const requestedKeys = await Promise.all(
+            requestedKeyIds.map((keyId) => this.appStateStore.getSyncKey(keyId))
+        )
+        const availableKeys = requestedKeys.filter(
+            (key): key is NonNullable<(typeof requestedKeys)[number]> => key !== null
+        )
+        const missingKeyIds = requestedKeyIds.filter((_, index) => requestedKeys[index] === null)
+
+        try {
+            await this.messageDispatch.sendAppStateSyncKeyShare(
+                requesterDeviceJid,
+                availableKeys,
+                missingKeyIds
+            )
+            this.logger.info('responded to app-state key request', {
+                id: event.stanzaId,
+                to: requesterDeviceJid,
+                requested: requestedKeyIds.length,
+                shared: availableKeys.length,
+                missing: missingKeyIds.length
+            })
+        } catch (error) {
+            this.logger.warn('failed to respond to app-state key request', {
+                id: event.stanzaId,
+                to: requesterDeviceJid,
+                requested: requestedKeyIds.length,
+                shared: availableKeys.length,
+                missing: missingKeyIds.length,
+                message: toError(error).message
+            })
+        }
+    }
+
+    private extractAppStateSyncKeyRequestIds(
+        request: Proto.Message.IAppStateSyncKeyRequest
+    ): readonly Uint8Array[] {
+        const deduped = new Map<string, Uint8Array>()
+        for (const key of request.keyIds ?? []) {
+            try {
+                const keyId = decodeProtoBytes(
+                    key.keyId,
+                    'appStateSyncKeyRequest.keyIds[].keyId'
+                )
+                const keyHex = bytesToHex(keyId)
+                if (deduped.has(keyHex)) {
+                    continue
+                }
+                deduped.set(keyHex, keyId)
+            } catch (error) {
+                this.logger.trace('ignoring malformed app-state key id request entry', {
+                    message: toError(error).message
+                })
+            }
+        }
+        return [...deduped.values()]
+    }
+
+    private isOwnAccountDeviceJid(candidateJid: string): boolean {
+        const credentials = this.authClient.getCurrentCredentials()
+        if (!credentials) {
+            return false
+        }
+
+        const candidateUser = toUserJid(candidateJid)
+        const meUsers = [credentials.meJid, credentials.meLid]
+            .filter((value): value is string => !!value)
+            .map((jid) => toUserJid(jid))
+        return meUsers.includes(candidateUser)
     }
 
     private async handleHistorySyncNotification(
@@ -465,6 +624,8 @@ export class WaClient extends EventEmitter {
     public async disconnect(): Promise<void> {
         this.logger.info('wa client disconnect start')
         this.keepAlive.stop()
+        this.notifyAppStateKeyShareWaiters(false)
+        this.appStateBootstrapKeyShareWaitDone = false
         await this.authClient.clearTransientState()
         this.nodeOrchestrator.clearPending(new Error('client disconnected'))
         this.clockSkewMs = null
@@ -523,15 +684,124 @@ export class WaClient extends EventEmitter {
         if (!this.comms) {
             throw new Error('client is not connected')
         }
-        const syncResult = options.downloadExternalBlob
-            ? await this.appStateSync.sync(options)
-            : await this.appStateSync.sync({
+        const shouldWaitForKeyShare = (await this.appStateStore.getActiveSyncKey()) === null
+        if (shouldWaitForKeyShare && !this.appStateBootstrapKeyShareWaitDone) {
+            this.appStateBootstrapKeyShareWaitDone = true
+            this.logger.info('app-state bootstrap pre-sync waiting for key share', {
+                timeoutMs: WA_APP_STATE_KEY_SHARE_WAIT_TIMEOUT_MS
+            })
+            const received = await this.waitForAppStateKeyShare(WA_APP_STATE_KEY_SHARE_WAIT_TIMEOUT_MS)
+            if (received) {
+                this.logger.info('app-state bootstrap pre-sync received key share, continuing sync')
+            } else {
+                this.logger.warn('app-state bootstrap pre-sync key share wait timed out, continuing sync', {
+                    timeoutMs: WA_APP_STATE_KEY_SHARE_WAIT_TIMEOUT_MS
+                })
+            }
+        }
+        let syncResult = await this.executeAppStateSync(options)
+        let blockedCollections = this.getBlockedAppStateCollections(syncResult)
+        if (!shouldWaitForKeyShare || blockedCollections.length === 0) {
+            this.emitChatEventsFromAppStateSyncResult(syncResult)
+            return syncResult
+        }
+
+        let retryCount = 0
+        let observedKeyShareVersion = this.appStateKeyShareVersion
+        while (
+            blockedCollections.length > 0 &&
+            retryCount < WA_APP_STATE_KEY_SHARE_MAX_RETRIES
+        ) {
+            const hasFreshShare = this.appStateKeyShareVersion !== observedKeyShareVersion
+            if (!hasFreshShare) {
+                this.logger.info('app-state bootstrap waiting for key share', {
+                    blockedCollections: blockedCollections.join(','),
+                    timeoutMs: WA_APP_STATE_KEY_SHARE_WAIT_TIMEOUT_MS,
+                    retryCount: retryCount + 1
+                })
+                const received = await this.waitForAppStateKeyShare(
+                    WA_APP_STATE_KEY_SHARE_WAIT_TIMEOUT_MS
+                )
+                if (!received) {
+                    this.logger.warn('app-state bootstrap key share wait timed out', {
+                        blockedCollections: blockedCollections.join(','),
+                        timeoutMs: WA_APP_STATE_KEY_SHARE_WAIT_TIMEOUT_MS
+                    })
+                    break
+                }
+            }
+
+            observedKeyShareVersion = this.appStateKeyShareVersion
+            retryCount += 1
+            this.logger.info('app-state bootstrap retrying sync after key share', {
+                retryCount,
+                blockedCollections: blockedCollections.join(',')
+            })
+            syncResult = await this.executeAppStateSync(options)
+            blockedCollections = this.getBlockedAppStateCollections(syncResult)
+        }
+
+        if (blockedCollections.length > 0) {
+            this.logger.warn('app-state bootstrap still blocked after waiting for key share', {
+                blockedCollections: blockedCollections.join(','),
+                retries: retryCount
+            })
+        }
+
+        this.emitChatEventsFromAppStateSyncResult(syncResult)
+        return syncResult
+    }
+
+    private async executeAppStateSync(options: WaAppStateSyncOptions): Promise<WaAppStateSyncResult> {
+        return options.downloadExternalBlob
+            ? this.appStateSync.sync(options)
+            : this.appStateSync.sync({
                   ...options,
                   downloadExternalBlob: async (_collection, _kind, reference) =>
                       downloadExternalBlobReference(this.mediaTransfer, reference)
               })
-        this.emitChatEventsFromAppStateSyncResult(syncResult)
-        return syncResult
+    }
+
+    private getBlockedAppStateCollections(syncResult: WaAppStateSyncResult): readonly string[] {
+        return syncResult.collections
+            .filter((entry) => entry.state === WA_APP_STATE_COLLECTION_STATES.BLOCKED)
+            .map((entry) => entry.collection)
+    }
+
+    private async waitForAppStateKeyShare(timeoutMs: number): Promise<boolean> {
+        return new Promise<boolean>((resolve) => {
+            let settled = false
+            let timeoutHandle: ReturnType<typeof setTimeout> | null = null
+
+            const waiter = (received: boolean) => {
+                if (settled) {
+                    return
+                }
+                settled = true
+                if (timeoutHandle) {
+                    clearTimeout(timeoutHandle)
+                    timeoutHandle = null
+                }
+                this.appStateKeyShareWaiters.delete(waiter)
+                resolve(received)
+            }
+
+            this.appStateKeyShareWaiters.add(waiter)
+            timeoutHandle = setTimeout(() => {
+                waiter(false)
+            }, timeoutMs)
+        })
+    }
+
+    private notifyAppStateKeyShareWaiters(received: boolean): void {
+        if (this.appStateKeyShareWaiters.size === 0) {
+            return
+        }
+        const waiters = [...this.appStateKeyShareWaiters.values()]
+        this.appStateKeyShareWaiters.clear()
+        for (const waiter of waiters) {
+            waiter(received)
+        }
     }
 
     private emitChatEventsFromAppStateSyncResult(syncResult: WaAppStateSyncResult): void {
@@ -651,15 +921,15 @@ export class WaClient extends EventEmitter {
 
     private async clearStoredState(): Promise<void> {
         await this.authClient.clearStoredCredentials()
-        await Promise.all([
-            this.appStateStore.clear(),
-            this.contactStore.clear(),
-            this.messageStore.clear(),
-            this.participantsStore.clear(),
-            this.deviceListStore.clear(),
-            this.retryStore.clear(),
-            this.threadStore.clear()
-        ])
+        await this.appStateStore.clear()
+        await this.contactStore.clear()
+        await this.messageStore.clear()
+        await this.participantsStore.clear()
+        await this.deviceListStore.clear()
+        await this.retryStore.clear()
+        await this.signalStore.clear()
+        await this.senderKeyStore.clear()
+        await this.threadStore.clear()
     }
 
     private handleError(error: Error): void {
@@ -668,6 +938,7 @@ export class WaClient extends EventEmitter {
     }
 
     private clearCommsBinding(): void {
+        this.notifyAppStateKeyShareWaiters(false)
         this.comms = null
         this.nodeTransport.bindComms(null)
     }

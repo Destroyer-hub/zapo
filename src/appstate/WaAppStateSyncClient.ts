@@ -1,6 +1,7 @@
 import { APP_STATE_DEFAULT_COLLECTIONS, APP_STATE_EMPTY_LT_HASH } from '@appstate/constants'
 import type {
     AppStateCollectionName,
+    WaAppStateMissingKeysEvent,
     WaAppStateCollectionSyncResult,
     WaAppStateMutation,
     WaAppStateMutationInput,
@@ -56,11 +57,21 @@ interface WaAppStateSyncClientOptions {
     readonly store: WaAppStateStore
     readonly hostDomain?: string
     readonly defaultTimeoutMs?: number
+    readonly onMissingKeys?: (event: WaAppStateMissingKeysEvent) => Promise<void>
 }
 
 export class WaAppStateMissingKeyError extends Error {
-    public constructor(message: string) {
+    public readonly keyId: Uint8Array | null
+    public readonly collection: AppStateCollectionName
+
+    public constructor(
+        message: string,
+        keyId: Uint8Array | null,
+        collection: AppStateCollectionName
+    ) {
         super(message)
+        this.keyId = keyId
+        this.collection = collection
         this.name = 'WaAppStateMissingKeyError'
     }
 }
@@ -71,6 +82,7 @@ export class WaAppStateSyncClient {
     private readonly store: WaAppStateStore
     private readonly hostDomain: string
     private readonly defaultTimeoutMs: number
+    private readonly onMissingKeys?: (event: WaAppStateMissingKeysEvent) => Promise<void>
     private readonly crypto: WaAppStateCrypto
     private syncContext: {
         readonly keys: Map<string, Uint8Array | null>
@@ -85,6 +97,7 @@ export class WaAppStateSyncClient {
         this.store = options.store
         this.hostDomain = options.hostDomain ?? WA_DEFAULTS.HOST_DOMAIN
         this.defaultTimeoutMs = options.defaultTimeoutMs ?? WA_DEFAULTS.APP_STATE_SYNC_TIMEOUT_MS
+        this.onMissingKeys = options.onMissingKeys
 
         this.crypto = new WaAppStateCrypto()
         this.syncContext = null
@@ -113,6 +126,12 @@ export class WaAppStateSyncClient {
                 item.keyId?.keyId,
                 'appStateSyncKeyShare.keys[].keyId.keyId'
             )
+            if (!item.keyData?.keyData) {
+                this.logger.debug('app-state sync key share entry missing key data', {
+                    keyId: keyIdToHex(keyId)
+                })
+                continue
+            }
             const keyData = decodeProtoBytes(
                 item.keyData?.keyData,
                 'appStateSyncKeyShare.keys[].keyData.keyData'
@@ -120,10 +139,13 @@ export class WaAppStateSyncClient {
             keys.push({
                 keyId,
                 keyData,
-                timestamp: this.normalizeProtoLong(
-                    item.keyData?.timestamp,
-                    'appStateSyncKeyShare.keys[].keyData.timestamp'
-                ),
+                timestamp:
+                    item.keyData?.timestamp === null || item.keyData?.timestamp === undefined
+                        ? Date.now()
+                        : this.normalizeProtoLong(
+                              item.keyData?.timestamp,
+                              'appStateSyncKeyShare.keys[].keyData.timestamp'
+                          ),
                 fingerprint: item.keyData?.fingerprint ?? undefined
             })
         }
@@ -165,6 +187,7 @@ export class WaAppStateSyncClient {
             const resultMap = new Map<AppStateCollectionName, WaAppStateCollectionSyncResult>()
             let stateChanged = false
             let collectionsToSync = [...collections]
+            const missingKeysHandler = options.onMissingKeys ?? this.onMissingKeys
             const maxSyncIterations = 5
             let syncIteration = 0
 
@@ -192,6 +215,17 @@ export class WaAppStateSyncClient {
                 stateChanged = stateChanged || round.stateChanged
                 for (const result of round.results) {
                     resultMap.set(result.collection, result)
+                }
+                if (
+                    missingKeysHandler &&
+                    round.missingKeyIds.length > 0 &&
+                    round.blockedCollections.length > 0
+                ) {
+                    await this.notifyMissingKeys({
+                        onMissingKeys: missingKeysHandler,
+                        keyIds: round.missingKeyIds,
+                        collections: round.blockedCollections
+                    })
                 }
 
                 collectionsToSync = [...round.collectionsToRefetch]
@@ -239,6 +273,8 @@ export class WaAppStateSyncClient {
         readonly results: readonly WaAppStateCollectionSyncResult[]
         readonly collectionsToRefetch: readonly AppStateCollectionName[]
         readonly stateChanged: boolean
+        readonly missingKeyIds: readonly Uint8Array[]
+        readonly blockedCollections: readonly AppStateCollectionName[]
     }> {
         const prepared = await this.prepareSyncRoundRequest(collections, pendingByCollection)
         const iqNode = this.buildSyncIqNode(prepared.collectionNodes)
@@ -263,7 +299,15 @@ export class WaAppStateSyncClient {
             collectionsToRefetch: collectionOutcomes
                 .filter((entry) => entry.shouldRefetch)
                 .map((entry) => entry.collection),
-            stateChanged: collectionOutcomes.some((entry) => entry.stateChanged)
+            stateChanged: collectionOutcomes.some((entry) => entry.stateChanged),
+            missingKeyIds: this.collectDistinctMissingKeyIds(
+                collectionOutcomes
+                    .map((entry) => entry.missingKeyId)
+                    .filter((value): value is Uint8Array => value !== null)
+            ),
+            blockedCollections: collectionOutcomes
+                .filter((entry) => entry.result.state === WA_APP_STATE_COLLECTION_STATES.BLOCKED)
+                .map((entry) => entry.collection)
         }
     }
 
@@ -419,6 +463,7 @@ export class WaAppStateSyncClient {
         readonly shouldRefetch: boolean
         readonly stateChanged: boolean
         readonly result: WaAppStateCollectionSyncResult
+        readonly missingKeyId: Uint8Array | null
     }> {
         const payload = payloadByCollection.get(collection)
         let shouldRefetch = false
@@ -551,7 +596,9 @@ export class WaAppStateSyncClient {
                     WA_APP_STATE_COLLECTION_STATES.BLOCKED,
                     payload.version,
                     shouldRefetch,
-                    collectionStateChanged
+                    collectionStateChanged,
+                    undefined,
+                    error.keyId
                 )
             }
             const message = error instanceof Error ? error.message : String(error)
@@ -575,23 +622,70 @@ export class WaAppStateSyncClient {
         version?: number,
         shouldRefetch = false,
         stateChanged = false,
-        mutations?: readonly WaAppStateMutation[]
+        mutations?: readonly WaAppStateMutation[],
+        missingKeyId: Uint8Array | null = null
     ): {
         readonly collection: AppStateCollectionName
         readonly shouldRefetch: boolean
         readonly stateChanged: boolean
         readonly result: WaAppStateCollectionSyncResult
+        readonly missingKeyId: Uint8Array | null
     } {
         return {
             collection,
             shouldRefetch,
             stateChanged,
+            missingKeyId,
             result: {
                 collection,
                 state,
                 version,
                 ...(mutations ? { mutations } : {})
             }
+        }
+    }
+
+    private collectDistinctMissingKeyIds(keyIds: readonly Uint8Array[]): readonly Uint8Array[] {
+        const byHex = new Map<string, Uint8Array>()
+        for (const keyId of keyIds) {
+            const keyHex = keyIdToHex(keyId)
+            if (byHex.has(keyHex)) {
+                continue
+            }
+            byHex.set(keyHex, keyId)
+        }
+        return [...byHex.values()]
+    }
+
+    private async notifyMissingKeys(input: {
+        readonly onMissingKeys: (event: WaAppStateMissingKeysEvent) => Promise<void>
+        readonly keyIds: readonly Uint8Array[]
+        readonly collections: readonly AppStateCollectionName[]
+    }): Promise<void> {
+        const keyIds = this.collectDistinctMissingKeyIds(input.keyIds)
+        const collections = [...new Set(input.collections)]
+        if (keyIds.length === 0 || collections.length === 0) {
+            return
+        }
+
+        const keyIdsHex = keyIds.map((keyId) => keyIdToHex(keyId))
+        this.logger.info('app-state requesting missing sync keys', {
+            keys: keyIdsHex.length,
+            keyIds: keyIdsHex.join(','),
+            collections: collections.join(',')
+        })
+
+        try {
+            await input.onMissingKeys({
+                keyIds,
+                collections
+            })
+        } catch (error) {
+            this.logger.warn('app-state missing key callback failed', {
+                keys: keyIdsHex.length,
+                collections: collections.join(','),
+                message: error instanceof Error ? error.message : String(error)
+            })
         }
     }
 
@@ -709,7 +803,9 @@ export class WaAppStateSyncClient {
         const keyData = await this.getKeyData(keyId)
         if (!keyData) {
             throw new WaAppStateMissingKeyError(
-                `missing snapshot key ${keyIdToHex(keyId)} for ${collection}`
+                `missing snapshot key ${keyIdToHex(keyId)} for ${collection}`,
+                keyId,
+                collection
             )
         }
 
@@ -772,7 +868,9 @@ export class WaAppStateSyncClient {
         const patchKeyData = await this.getKeyData(patchKeyId)
         if (!patchKeyData) {
             throw new WaAppStateMissingKeyError(
-                `missing patch key ${keyIdToHex(patchKeyId)} for ${collection}`
+                `missing patch key ${keyIdToHex(patchKeyId)} for ${collection}`,
+                patchKeyId,
+                collection
             )
         }
 
@@ -828,7 +926,9 @@ export class WaAppStateSyncClient {
                 const recordKeyData = await this.getKeyData(recordKeyId)
                 if (!recordKeyData) {
                     throw new WaAppStateMissingKeyError(
-                        `missing snapshot mutation key ${keyIdToHex(recordKeyId)} for ${collection}`
+                        `missing snapshot mutation key ${keyIdToHex(recordKeyId)} for ${collection}`,
+                        recordKeyId,
+                        collection
                     )
                 }
                 const decrypted = await this.crypto.decryptMutation({
@@ -875,7 +975,9 @@ export class WaAppStateSyncClient {
                 const recordKeyData = await this.getKeyData(recordKeyId)
                 if (!recordKeyData) {
                     throw new WaAppStateMissingKeyError(
-                        `missing mutation key ${keyIdToHex(recordKeyId)} for ${collection}`
+                        `missing mutation key ${keyIdToHex(recordKeyId)} for ${collection}`,
+                        recordKeyId,
+                        collection
                     )
                 }
                 const decrypted = await this.crypto.decryptMutation({
@@ -947,7 +1049,11 @@ export class WaAppStateSyncClient {
     ): Promise<{ readonly encodedPatch: Uint8Array; readonly context: OutgoingPatchContext }> {
         const activeKey = await this.store.getActiveSyncKey()
         if (!activeKey) {
-            throw new WaAppStateMissingKeyError(`no sync key available to upload ${collection}`)
+            throw new WaAppStateMissingKeyError(
+                `no sync key available to upload ${collection}`,
+                null,
+                collection
+            )
         }
 
         const encryptedResults = await Promise.all(

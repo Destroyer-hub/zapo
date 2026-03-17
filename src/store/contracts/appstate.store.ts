@@ -20,6 +20,7 @@ export interface WaAppStateCollectionStateUpdate {
 export interface WaAppStateStore {
     exportData(): Promise<WaAppStateStoreData>
     upsertSyncKeys(keys: readonly WaAppStateSyncKey[]): Promise<number>
+    getSyncKey(keyId: Uint8Array): Promise<WaAppStateSyncKey | null>
     getSyncKeyData(keyId: Uint8Array): Promise<Uint8Array | null>
     getActiveSyncKey(): Promise<WaAppStateSyncKey | null>
     getCollectionState(collection: AppStateCollectionName): Promise<WaAppStateCollectionStoreState>

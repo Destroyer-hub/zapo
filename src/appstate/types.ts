@@ -67,6 +67,11 @@ export interface WaAppStateSyncResult {
     readonly collections: readonly WaAppStateCollectionSyncResult[]
 }
 
+export interface WaAppStateMissingKeysEvent {
+    readonly keyIds: readonly Uint8Array[]
+    readonly collections: readonly AppStateCollectionName[]
+}
+
 export interface WaAppStateSyncOptions {
     readonly collections?: readonly AppStateCollectionName[]
     readonly pendingMutations?: readonly WaAppStateMutationInput[]
@@ -76,4 +81,5 @@ export interface WaAppStateSyncOptions {
         reference: Proto.IExternalBlobReference
     ) => Promise<Uint8Array>
     readonly timeoutMs?: number
+    readonly onMissingKeys?: (event: WaAppStateMissingKeysEvent) => Promise<void>
 }

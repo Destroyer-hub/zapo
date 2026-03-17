@@ -41,4 +41,5 @@ export interface WaSignalStore {
             readonly identityKey: Uint8Array
         }[]
     ): Promise<void>
+    clear(): Promise<void>
 }

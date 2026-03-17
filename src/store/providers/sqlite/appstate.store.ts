@@ -109,6 +109,25 @@ export class WaAppStateSqliteStore extends BaseSqliteStore implements WaAppState
         return inserted
     }
 
+    public async getSyncKey(keyId: Uint8Array): Promise<WaAppStateSyncKey | null> {
+        const db = await this.getConnection()
+        const row = db.get<AppStateSyncKeyRow>(
+            `SELECT key_id, key_data, timestamp, fingerprint
+             FROM appstate_sync_keys
+             WHERE session_id = ? AND key_id = ?`,
+            [this.options.sessionId, keyId]
+        )
+        if (!row) {
+            return null
+        }
+        return {
+            keyId: asBytes(row.key_id, 'appstate_sync_keys.key_id'),
+            keyData: asBytes(row.key_data, 'appstate_sync_keys.key_data'),
+            timestamp: asNumber(row.timestamp, 'appstate_sync_keys.timestamp'),
+            fingerprint: decodeAppStateFingerprint(row.fingerprint)
+        }
+    }
+
     public async getSyncKeyData(keyId: Uint8Array): Promise<Uint8Array | null> {
         const db = await this.getConnection()
         const row = db.get<KeyDataRow>(

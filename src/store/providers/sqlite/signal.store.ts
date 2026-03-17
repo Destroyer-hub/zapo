@@ -453,6 +453,17 @@ export class WaSignalSqliteStore extends BaseSqliteStore implements WaSignalStor
         })
     }
 
+    public async clear(): Promise<void> {
+        await this.withTransaction((db) => {
+            db.run('DELETE FROM signal_registration WHERE session_id = ?', [this.options.sessionId])
+            db.run('DELETE FROM signal_signed_prekey WHERE session_id = ?', [this.options.sessionId])
+            db.run('DELETE FROM signal_prekey WHERE session_id = ?', [this.options.sessionId])
+            db.run('DELETE FROM signal_session WHERE session_id = ?', [this.options.sessionId])
+            db.run('DELETE FROM signal_identity WHERE session_id = ?', [this.options.sessionId])
+            db.run('DELETE FROM signal_meta WHERE session_id = ?', [this.options.sessionId])
+        })
+    }
+
     private upsertPreKey(db: WaSqliteConnection, record: PreKeyRecord): void {
         db.run(
             `INSERT INTO signal_prekey (

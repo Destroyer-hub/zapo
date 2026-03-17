@@ -112,6 +112,10 @@ export class WaAppStateMemoryStore implements WaAppStateStore {
         return inserted
     }
 
+    public async getSyncKey(keyId: Uint8Array): Promise<WaAppStateSyncKey | null> {
+        return this.keys.get(keyIdToHex(keyId)) ?? null
+    }
+
     public async getSyncKeyData(keyId: Uint8Array): Promise<Uint8Array | null> {
         return this.keys.get(keyIdToHex(keyId))?.keyData ?? null
     }

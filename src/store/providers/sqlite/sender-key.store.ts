@@ -223,6 +223,15 @@ export class SenderKeySqliteStore extends BaseSqliteStore implements WaSenderKey
         })
     }
 
+    public async clear(): Promise<void> {
+        await this.withTransaction((db) => {
+            db.run('DELETE FROM sender_keys WHERE session_id = ?', [this.options.sessionId])
+            db.run('DELETE FROM sender_key_distribution WHERE session_id = ?', [
+                this.options.sessionId
+            ])
+        })
+    }
+
     private countDelete(
         db: WaSqliteConnection,
         table: 'sender_keys' | 'sender_key_distribution',

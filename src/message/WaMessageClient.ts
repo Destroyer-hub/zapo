@@ -169,6 +169,12 @@ export class WaMessageClient {
         if (input.id) {
             attrs.id = input.id
         }
+        if (input.category) {
+            attrs.category = input.category
+        }
+        if (input.pushPriority) {
+            attrs.push_priority = input.pushPriority
+        }
         if (input.participant) {
             attrs.participant = input.participant
         }

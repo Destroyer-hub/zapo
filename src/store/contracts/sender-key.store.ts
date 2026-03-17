@@ -19,4 +19,5 @@ export interface WaSenderKeyStore {
     ): Promise<readonly (SenderKeyDistributionRecord | null)[]>
     deleteDeviceSenderKey(target: SignalAddress, groupId?: string): Promise<number>
     markForgetSenderKey(groupId: string, participants: readonly SignalAddress[]): Promise<number>
+    clear(): Promise<void>
 }

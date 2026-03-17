@@ -249,6 +249,7 @@ function createIncomingNodeRuntime(input: {
     readonly streamControl: WaStreamControlHandler
     readonly mediaMessageBuildOptions: WaMediaMessageBuildOptions
     readonly retryCoordinator: WaRetryCoordinator
+    readonly messageDispatch: WaMessageDispatchCoordinator
     readonly getCurrentMeJid: () => string | null | undefined
     readonly handleClientDirtyBits: (
         dirtyBits: Parameters<typeof handleDirtyBits>[1]
@@ -263,6 +264,7 @@ function createIncomingNodeRuntime(input: {
         streamControl,
         mediaMessageBuildOptions,
         retryCoordinator,
+        messageDispatch,
         getCurrentMeJid,
         handleClientDirtyBits,
         incomingMessageAckOptions
@@ -299,7 +301,17 @@ function createIncomingNodeRuntime(input: {
         emitIncomingFailure: (event) => host.emitEvent('failure', event),
         emitIncomingErrorStanza: (event) => host.emitEvent('stanza_error', event),
         emitIncomingNotification: (event) => host.emitEvent('notification', event),
-        emitGroupEvent: (event) => host.emitEvent('group_event', event),
+        emitGroupEvent: (event) => {
+            host.emitEvent('group_event', event)
+            void messageDispatch.mutateParticipantsCacheFromGroupEvent(event).catch((error) => {
+                logger.warn('failed to mutate participants cache from group event', {
+                    action: event.action,
+                    groupJid: event.groupJid,
+                    contextGroupJid: event.contextGroupJid,
+                    message: toError(error).message
+                })
+            })
+        },
         emitUnhandledIncomingNode: (event) => host.emitEvent('stanza_unhandled', event),
         syncAppState: host.syncAppState,
         disconnect: host.disconnect,
@@ -453,7 +465,10 @@ export function buildWaClientDependencies(input: {
         logger,
         query: host.query,
         defaultTimeoutMs: options.appStateSyncTimeoutMs,
-        store: sessionStore.appState
+        store: sessionStore.appState,
+        onMissingKeys: async ({ keyIds }) => {
+            await messageDispatch.requestAppStateSyncKeys(keyIds)
+        }
     })
     const streamControl = createStreamControlHandler({
         logger,
@@ -487,6 +502,7 @@ export function buildWaClientDependencies(input: {
             streamControl,
             mediaMessageBuildOptions,
             retryCoordinator,
+            messageDispatch,
             getCurrentMeJid,
             handleClientDirtyBits,
             incomingMessageAckOptions

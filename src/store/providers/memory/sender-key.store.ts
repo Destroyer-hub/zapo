@@ -134,6 +134,11 @@ export class SenderKeyMemoryStore implements WaSenderKeyStoreContract {
         return deleted
     }
 
+    public async clear(): Promise<void> {
+        this.senderKeys.clear()
+        this.senderDistributions.clear()
+    }
+
     private deleteMatching<T extends { groupId: string; sender: SignalAddress }>(
         map: Map<string, T>,
         target: SignalAddress,

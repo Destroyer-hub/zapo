@@ -1,4 +1,11 @@
-import type { WaSignalMessagePublishInput, WaSendMessageOptions } from '@client/types'
+import type {
+    WaAppStateSyncKey
+} from '@appstate/types'
+import type {
+    WaGroupEvent,
+    WaSignalMessagePublishInput,
+    WaSendMessageOptions
+} from '@client/types'
 import { toSerializedPubKey } from '@crypto/core/keys'
 import type { Logger } from '@infra/log/types'
 import { resolveMessageTypeAttr } from '@message/content'
@@ -43,7 +50,7 @@ import {
     buildGroupSenderKeyMessageNode
 } from '@transport/node/builders/message'
 import type { BinaryNode } from '@transport/types'
-import { uint8Equal } from '@util/bytes'
+import { bytesToHex, uint8Equal } from '@util/bytes'
 import { toError } from '@util/primitives'
 import { signalAddressKey } from '@util/signal-address'
 
@@ -216,6 +223,8 @@ export class WaMessageDispatchCoordinator {
                         ciphertext: encrypted.ciphertext,
                         id: input.id,
                         type: input.type,
+                        category: input.category,
+                        pushPriority: input.pushPriority,
                         participant: input.participant,
                         deviceFanout: input.deviceFanout
                     },
@@ -261,6 +270,232 @@ export class WaMessageDispatchCoordinator {
 
     public async sendReceipt(input: WaSendReceiptInput): Promise<void> {
         await this.messageClient.sendReceipt(input)
+    }
+
+    public async requestAppStateSyncKeys(keyIds: readonly Uint8Array[]): Promise<readonly string[]> {
+        const normalizedKeyIds = this.normalizeKeyIds(keyIds)
+        if (normalizedKeyIds.length === 0) {
+            return []
+        }
+
+        const peerDeviceJids = await this.resolveOwnPeerDeviceJids()
+        if (peerDeviceJids.length === 0) {
+            this.logger.warn('app-state sync key request skipped: no peer devices available', {
+                keys: normalizedKeyIds.length
+            })
+            return []
+        }
+
+        const protocolMessage: Proto.Message.IProtocolMessage = {
+            type: proto.Message.ProtocolMessage.Type.APP_STATE_SYNC_KEY_REQUEST,
+            appStateSyncKeyRequest: {
+                keyIds: normalizedKeyIds.map((keyId) => ({
+                    keyId
+                }))
+            }
+        }
+        await Promise.all(
+            peerDeviceJids.map((deviceJid) =>
+                this.publishProtocolMessageToDevice(deviceJid, protocolMessage)
+            )
+        )
+        this.logger.info('app-state sync key request sent to peer devices', {
+            devices: peerDeviceJids.length,
+            keys: normalizedKeyIds.length,
+            keyIds: normalizedKeyIds.map((keyId) => bytesToHex(keyId)).join(',')
+        })
+        return peerDeviceJids
+    }
+
+    public async sendAppStateSyncKeyShare(
+        toDeviceJid: string,
+        keys: readonly WaAppStateSyncKey[],
+        missingKeyIds: readonly Uint8Array[] = []
+    ): Promise<void> {
+        const normalizedTo = normalizeDeviceJid(toDeviceJid)
+        const dedupedKeysById = new Map<string, WaAppStateSyncKey>()
+        for (const key of keys) {
+            dedupedKeysById.set(bytesToHex(key.keyId), key)
+        }
+        const dedupedKeys = [...dedupedKeysById.values()]
+        const dedupedMissingKeyIds = this.normalizeKeyIds(missingKeyIds).filter(
+            (keyId) => !dedupedKeysById.has(bytesToHex(keyId))
+        )
+        const keyShareEntries = [
+            ...dedupedKeys.map((key) => ({
+                keyId: { keyId: key.keyId },
+                keyData: {
+                    keyData: key.keyData,
+                    timestamp: key.timestamp,
+                    ...(key.fingerprint ? { fingerprint: key.fingerprint } : {})
+                }
+            })),
+            ...dedupedMissingKeyIds.map((keyId) => ({
+                keyId: { keyId }
+            }))
+        ]
+        const protocolMessage: Proto.Message.IProtocolMessage = {
+            type: proto.Message.ProtocolMessage.Type.APP_STATE_SYNC_KEY_SHARE,
+            appStateSyncKeyShare: {
+                keys: keyShareEntries
+            }
+        }
+        await this.publishProtocolMessageToDevice(normalizedTo, protocolMessage)
+        this.logger.info('app-state sync key share sent', {
+            to: normalizedTo,
+            keys: dedupedKeys.length,
+            orphanKeys: dedupedMissingKeyIds.length
+        })
+    }
+
+    public async mutateParticipantsCacheFromGroupEvent(event: WaGroupEvent): Promise<void> {
+        const groupJid = this.resolveGroupJidForParticipantCacheEvent(event)
+        if (!groupJid) {
+            return
+        }
+
+        if (event.action === 'delete') {
+            await this.participantsStore.deleteGroupParticipants(groupJid)
+            return
+        }
+
+        const participantUsers = this.extractParticipantUsersFromGroupEvent(event)
+        if (event.action === 'create') {
+            if (participantUsers.length === 0) {
+                return
+            }
+            await this.participantsStore.upsertGroupParticipants({
+                groupJid,
+                participants: participantUsers,
+                updatedAtMs: Date.now()
+            })
+            return
+        }
+
+        const cached = await this.participantsStore.getGroupParticipants(groupJid)
+        if (!cached || cached.participants.length === 0) {
+            return
+        }
+
+        const cachedParticipants = this.sanitizeParticipantUsers(cached.participants)
+        if (cachedParticipants.length === 0) {
+            return
+        }
+
+        if (
+            event.action === 'add' ||
+            event.action === 'promote' ||
+            event.action === 'demote' ||
+            event.action === 'linked_group_promote' ||
+            event.action === 'linked_group_demote'
+        ) {
+            await this.mergeParticipantUsersIntoCache(groupJid, cachedParticipants, participantUsers)
+            return
+        }
+
+        if (event.action === 'remove') {
+            await this.removeParticipantUsersFromCache(
+                groupJid,
+                cachedParticipants,
+                participantUsers
+            )
+            return
+        }
+
+        if (event.action === 'modify') {
+            const authorUsers = event.authorJid
+                ? this.sanitizeParticipantUsers([event.authorJid])
+                : []
+            await this.replaceParticipantUsersInCache(
+                groupJid,
+                cachedParticipants,
+                authorUsers,
+                participantUsers
+            )
+        }
+    }
+
+    private async publishProtocolMessageToDevice(
+        deviceJid: string,
+        protocolMessage: Proto.Message.IProtocolMessage
+    ): Promise<void> {
+        const plaintext = await writeRandomPadMax16(
+            proto.Message.encode({
+                protocolMessage
+            }).finish()
+        )
+        await this.publishSignalMessage({
+            to: deviceJid,
+            plaintext,
+            type: 'protocol',
+            category: 'peer',
+            pushPriority: 'high'
+        })
+    }
+
+    private async resolveOwnPeerDeviceJids(): Promise<readonly string[]> {
+        const meJid = this.requireCurrentMeJid('resolveOwnPeerDeviceJids')
+        const meUserJid = toUserJid(meJid)
+        const meDevices = new Set<string>()
+        meDevices.add(normalizeDeviceJid(meJid))
+
+        const meLid = this.getCurrentMeLid()
+        if (meLid && meLid.includes('@')) {
+            try {
+                meDevices.add(normalizeDeviceJid(meLid))
+            } catch (error) {
+                this.logger.trace('ignoring malformed me lid jid while resolving peer devices', {
+                    meLid,
+                    message: toError(error).message
+                })
+            }
+        }
+
+        try {
+            const synced = await this.signalDeviceSync.syncDeviceList([meUserJid])
+            const peerDevices = new Set<string>()
+            for (const entry of synced) {
+                const sourceDevices = entry.deviceJids.length > 0 ? entry.deviceJids : [entry.jid]
+                for (const deviceJid of sourceDevices) {
+                    try {
+                        const normalized = normalizeDeviceJid(deviceJid)
+                        if (meDevices.has(normalized)) {
+                            continue
+                        }
+                        peerDevices.add(normalized)
+                    } catch (error) {
+                        this.logger.trace(
+                            'ignoring malformed peer device jid while resolving app-state peers',
+                            {
+                                deviceJid,
+                                message: toError(error).message
+                            }
+                        )
+                    }
+                }
+            }
+            return [...peerDevices]
+        } catch (error) {
+            this.logger.warn('failed to resolve peer devices for app-state key request', {
+                message: toError(error).message
+            })
+            return []
+        }
+    }
+
+    private normalizeKeyIds(keyIds: readonly Uint8Array[]): readonly Uint8Array[] {
+        const deduped = new Map<string, Uint8Array>()
+        for (const keyId of keyIds) {
+            if (keyId.byteLength === 0) {
+                continue
+            }
+            const keyHex = bytesToHex(keyId)
+            if (deduped.has(keyHex)) {
+                continue
+            }
+            deduped.set(keyHex, keyId)
+        }
+        return [...deduped.values()]
     }
 
     private async publishWithRetryTracking(
@@ -602,6 +837,125 @@ export class WaMessageDispatchCoordinator {
             return this.sanitizeParticipantUsers(cached.participants)
         }
         return this.refreshGroupParticipantUsers(groupJid)
+    }
+
+    private resolveGroupJidForParticipantCacheEvent(event: WaGroupEvent): string | null {
+        if (event.action === 'linked_group_promote' || event.action === 'linked_group_demote') {
+            return event.contextGroupJid ?? event.groupJid ?? null
+        }
+        return event.groupJid ?? null
+    }
+
+    private extractParticipantUsersFromGroupEvent(event: WaGroupEvent): readonly string[] {
+        const candidates: string[] = []
+        for (const participant of event.participants ?? []) {
+            if (participant.jid) {
+                candidates.push(participant.jid)
+            }
+            if (participant.lidJid) {
+                candidates.push(participant.lidJid)
+            }
+            if (participant.phoneJid) {
+                candidates.push(participant.phoneJid)
+            }
+        }
+        return this.sanitizeParticipantUsers(candidates)
+    }
+
+    private async mergeParticipantUsersIntoCache(
+        groupJid: string,
+        cachedParticipants: readonly string[],
+        participantsToAdd: readonly string[]
+    ): Promise<void> {
+        if (participantsToAdd.length === 0) {
+            return
+        }
+        const nextParticipants = [...cachedParticipants]
+        const existing = new Set(cachedParticipants)
+        for (const participant of participantsToAdd) {
+            if (existing.has(participant)) {
+                continue
+            }
+            existing.add(participant)
+            nextParticipants.push(participant)
+        }
+        if (nextParticipants.length === cachedParticipants.length) {
+            return
+        }
+        await this.participantsStore.upsertGroupParticipants({
+            groupJid,
+            participants: nextParticipants,
+            updatedAtMs: Date.now()
+        })
+    }
+
+    private async removeParticipantUsersFromCache(
+        groupJid: string,
+        cachedParticipants: readonly string[],
+        participantsToRemove: readonly string[]
+    ): Promise<void> {
+        if (participantsToRemove.length === 0) {
+            return
+        }
+        const removed = new Set(participantsToRemove)
+        const nextParticipants = cachedParticipants.filter((participant) => !removed.has(participant))
+        if (nextParticipants.length === cachedParticipants.length) {
+            return
+        }
+        if (nextParticipants.length === 0) {
+            await this.participantsStore.deleteGroupParticipants(groupJid)
+            return
+        }
+        await this.participantsStore.upsertGroupParticipants({
+            groupJid,
+            participants: nextParticipants,
+            updatedAtMs: Date.now()
+        })
+    }
+
+    private async replaceParticipantUsersInCache(
+        groupJid: string,
+        cachedParticipants: readonly string[],
+        participantsToReplace: readonly string[],
+        replacementParticipants: readonly string[]
+    ): Promise<void> {
+        const toReplace = new Set(participantsToReplace)
+        const nextParticipants = cachedParticipants.filter((participant) => !toReplace.has(participant))
+        const existing = new Set(nextParticipants)
+        for (const participant of replacementParticipants) {
+            if (existing.has(participant)) {
+                continue
+            }
+            existing.add(participant)
+            nextParticipants.push(participant)
+        }
+        if (this.areParticipantListsEqual(cachedParticipants, nextParticipants)) {
+            return
+        }
+        if (nextParticipants.length === 0) {
+            await this.participantsStore.deleteGroupParticipants(groupJid)
+            return
+        }
+        await this.participantsStore.upsertGroupParticipants({
+            groupJid,
+            participants: nextParticipants,
+            updatedAtMs: Date.now()
+        })
+    }
+
+    private areParticipantListsEqual(
+        left: readonly string[],
+        right: readonly string[]
+    ): boolean {
+        if (left.length !== right.length) {
+            return false
+        }
+        for (let index = 0; index < left.length; index += 1) {
+            if (left[index] !== right[index]) {
+                return false
+            }
+        }
+        return true
     }
 
     private async refreshGroupParticipantUsers(groupJid: string): Promise<readonly string[]> {

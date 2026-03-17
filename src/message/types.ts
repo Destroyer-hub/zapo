@@ -49,6 +49,8 @@ export interface WaEncryptedMessageInput {
     readonly encCount?: number
     readonly id?: string
     readonly type?: string
+    readonly category?: string
+    readonly pushPriority?: string
     readonly participant?: string
     readonly deviceFanout?: string
 }

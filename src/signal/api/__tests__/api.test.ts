@@ -250,6 +250,61 @@ test('signal device sync api parses users/devices and reuses cache when still fr
     }
 })
 
+test('signal device sync api preserves requested users omitted by usync response', async () => {
+    const api = new SignalDeviceSyncApi({
+        logger: createLogger(),
+        query: async () =>
+            iqResult([
+                {
+                    tag: WA_NODE_TAGS.USYNC,
+                    attrs: {},
+                    content: [
+                        {
+                            tag: WA_NODE_TAGS.LIST,
+                            attrs: {},
+                            content: [
+                                {
+                                    tag: WA_NODE_TAGS.USER,
+                                    attrs: { jid: '5511999999999@s.whatsapp.net' },
+                                    content: [
+                                        {
+                                            tag: WA_NODE_TAGS.DEVICES,
+                                            attrs: {},
+                                            content: [
+                                                {
+                                                    tag: 'device-list',
+                                                    attrs: {},
+                                                    content: [
+                                                        { tag: 'device', attrs: { id: '0' } }
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ])
+    })
+
+    const synced = await api.syncDeviceList([
+        '5511999999999@s.whatsapp.net',
+        '5511888888888@s.whatsapp.net'
+    ])
+    assert.deepEqual(synced, [
+        {
+            jid: '5511999999999@s.whatsapp.net',
+            deviceJids: ['5511999999999@s.whatsapp.net']
+        },
+        {
+            jid: '5511888888888@s.whatsapp.net',
+            deviceJids: []
+        }
+    ])
+})
+
 test('signal identity sync api parses result list and stores remote identities', async () => {
     const signalStore = new WaSignalMemoryStore()
     const api = new SignalIdentitySyncApi({

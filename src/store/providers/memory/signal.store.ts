@@ -238,6 +238,18 @@ export class WaSignalMemoryStore implements WaSignalStoreContract {
         }
     }
 
+    public async clear(): Promise<void> {
+        this.registrationInfo = null
+        this.signedPreKey = null
+        this.signedPreKeyRotationTs = null
+        this.preKeys.clear()
+        this.uploadedPreKeys.clear()
+        this.serverHasPreKeys = false
+        this.signalSessions.clear()
+        this.remoteIdentities.clear()
+        this.nextPreKeyId = 1
+    }
+
     private addUploadedPreKey(keyId: number): void {
         if (this.uploadedPreKeys.has(keyId)) {
             this.uploadedPreKeys.delete(keyId)

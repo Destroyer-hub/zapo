@@ -36,6 +36,8 @@ export interface WaSignalMessagePublishInput {
     readonly expectedIdentity?: Uint8Array
     readonly id?: string
     readonly type?: string
+    readonly category?: string
+    readonly pushPriority?: string
     readonly participant?: string
     readonly deviceFanout?: string
 }

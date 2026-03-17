@@ -53,10 +53,10 @@ export class SignalDeviceSyncApi {
             : normalizedUsers
 
         if (usersToQuery.length === 0) {
-            return normalizedUsers.flatMap((jid) => {
-                const deviceJids = cachedByUser.get(jid)
-                return deviceJids ? [{ jid, deviceJids }] : []
-            })
+            return normalizedUsers.map((jid) => ({
+                jid,
+                deviceJids: cachedByUser.get(jid) ?? []
+            }))
         }
 
         const request = this.makeDeviceSyncRequest(usersToQuery)
@@ -79,14 +79,10 @@ export class SignalDeviceSyncApi {
         const parsedByUser = new Map<string, readonly string[]>(
             parsed.map((entry) => [entry.jid, entry.deviceJids])
         )
-        const merged = normalizedUsers.flatMap((jid) => {
-            const parsedDeviceJids = parsedByUser.get(jid)
-            if (parsedDeviceJids) {
-                return [{ jid, deviceJids: parsedDeviceJids }]
-            }
-            const cachedDeviceJids = cachedByUser.get(jid)
-            return cachedDeviceJids ? [{ jid, deviceJids: cachedDeviceJids }] : []
-        })
+        const merged = normalizedUsers.map((jid) => ({
+            jid,
+            deviceJids: parsedByUser.get(jid) ?? cachedByUser.get(jid) ?? []
+        }))
         this.logger.debug('signal device sync success', {
             users: merged.length,
             devices: merged.reduce((total, entry) => total + entry.deviceJids.length, 0)
