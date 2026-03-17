@@ -6,10 +6,10 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/zapo">
-    <img alt="npm version" src="https://img.shields.io/npm/v/zapo?color=CB3837" />
+  <a href="https://www.npmjs.com/package/zapo-js">
+    <img alt="npm version" src="https://img.shields.io/npm/v/zapo-js?color=CB3837" />
   </a>
-  <img alt="npm package size" src="https://img.shields.io/npm/unpacked-size/zapo?label=package%20size&color=2F855A" />
+  <img alt="npm package size" src="https://img.shields.io/npm/unpacked-size/zapo-js?label=package%20size&color=2F855A" />
   <img alt="node version" src="https://img.shields.io/badge/node-%3E%3D20.9.0-339933" />
   <img alt="language" src="https://img.shields.io/badge/language-TypeScript-3178C6" />
   <img alt="focus" src="https://img.shields.io/badge/focus-high--scale%20%2B%20multi--session-0A7EA4" />
@@ -111,7 +111,7 @@ Auth state is persisted in `.auth/state.sqlite`.
 ## Minimal Usage
 
 ```ts
-import { createPinoLogger, createStore, WaClient } from 'zapo'
+import { createPinoLogger, createStore, WaClient } from 'zapo-js'
 
 const logger = await createPinoLogger({
     level: 'info',

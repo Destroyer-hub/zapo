@@ -1,5 +1,5 @@
 {
-    "name": "zapo",
+    "name": "zapo-js",
     "version": "0.1.0",
     "description": "High-performance WhatsApp Web TypeScript library",
     "main": "dist/index.js",
