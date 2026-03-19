@@ -234,7 +234,18 @@ test('message builders create fanout nodes and validate participant requirements
         to: '5511999999999@s.whatsapp.net',
         type: 'text',
         id: 'm1',
-        participants: [participant]
+        participants: [participant],
+        reportingNode: {
+            tag: 'reporting',
+            attrs: {},
+            content: [
+                {
+                    tag: 'reporting_token',
+                    attrs: { v: '2' },
+                    content: new Uint8Array([9])
+                }
+            ]
+        }
     })
 
     assert.equal(node.tag, 'message')
@@ -243,6 +254,10 @@ test('message builders create fanout nodes and validate participant requirements
         ? node.content.find((child) => child.tag === WA_NODE_TAGS.PARTICIPANTS)
         : null
     assert.ok(participantsNode)
+    const reportingNode = Array.isArray(node.content)
+        ? node.content.find((child) => child.tag === 'reporting')
+        : null
+    assert.ok(reportingNode)
 
     assert.throws(
         () =>
@@ -294,14 +309,25 @@ test('message builders cover group and inbound receipt branches', () => {
                 ciphertext: new Uint8Array([1])
             }
         ],
-        deviceIdentity: new Uint8Array([2, 3])
+        deviceIdentity: new Uint8Array([2, 3]),
+        reportingNode: {
+            tag: 'reporting',
+            attrs: {},
+            content: [
+                {
+                    tag: 'reporting_token',
+                    attrs: { v: '2' },
+                    content: new Uint8Array([1, 2])
+                }
+            ]
+        }
     })
     assert.equal(groupWithParticipants.attrs.addressing_mode, 'pn')
     assert.ok(Array.isArray(groupWithParticipants.content))
     assert.equal(groupWithParticipants.content[0].tag, WA_NODE_TAGS.PARTICIPANTS)
     assert.equal(
         groupWithParticipants.content[groupWithParticipants.content.length - 1].tag,
-        'device-identity'
+        'reporting'
     )
 
     const groupWithoutParticipants = buildGroupSenderKeyMessageNode({

@@ -11,6 +11,7 @@ import { isSendMediaMessage, resolveMessageTypeAttr } from '@message/content'
 import { unwrapDeviceSentMessage, wrapDeviceSentMessage } from '@message/device-sent'
 import { unpadPkcs7, writeRandomPadMax16 } from '@message/padding'
 import { computePhashV2 } from '@message/phash'
+import { buildReportingTokenNode, ensureMessageSecret } from '@message/reporting-token'
 
 test('ack helpers classify receipt and retryability correctly', () => {
     const ackNode = { tag: 'ack', attrs: { id: '1', type: 'error', code: '500' } }
@@ -64,4 +65,63 @@ test('padding and phash generation cover success and edge paths', async () => {
 
     const hash = await computePhashV2(['5511:0@c.us', '5511:2@s.whatsapp.net'])
     assert.match(hash, /^2:/)
+})
+
+test('reporting token helpers cover secret injection and deterministic token generation', async () => {
+    const prepared = await ensureMessageSecret({
+        conversation: 'hello'
+    })
+    assert.ok(prepared.messageContextInfo?.messageSecret)
+    assert.equal(prepared.messageContextInfo?.messageSecret?.byteLength, 32)
+
+    const baseMessage = {
+        conversation: 'hello',
+        messageContextInfo: {
+            messageSecret: new Uint8Array(32).fill(7)
+        }
+    }
+    const first = await buildReportingTokenNode({
+        message: baseMessage,
+        stanzaId: 'msg-1',
+        senderUserJid: '551100000000@s.whatsapp.net',
+        remoteJid: '551188888888@s.whatsapp.net'
+    })
+    const second = await buildReportingTokenNode({
+        message: baseMessage,
+        stanzaId: 'msg-1',
+        senderUserJid: '551100000000@s.whatsapp.net',
+        remoteJid: '551188888888@s.whatsapp.net'
+    })
+    assert.ok(first)
+    assert.ok(second)
+    assert.equal(first?.tag, 'reporting')
+    const firstTokenNode = Array.isArray(first?.content) ? first.content[0] : null
+    const secondTokenNode = Array.isArray(second?.content) ? second.content[0] : null
+    assert.equal(firstTokenNode?.tag, 'reporting_token')
+    assert.equal(firstTokenNode?.attrs.v, '2')
+    assert.ok(firstTokenNode?.content instanceof Uint8Array)
+    assert.equal((firstTokenNode?.content as Uint8Array).byteLength, 16)
+    assert.deepEqual(firstTokenNode?.content, secondTokenNode?.content)
+
+    const changedStanza = await buildReportingTokenNode({
+        message: baseMessage,
+        stanzaId: 'msg-2',
+        senderUserJid: '551100000000@s.whatsapp.net',
+        remoteJid: '551188888888@s.whatsapp.net'
+    })
+    const changedTokenNode = Array.isArray(changedStanza?.content) ? changedStanza.content[0] : null
+    assert.notDeepEqual(firstTokenNode?.content, changedTokenNode?.content)
+
+    const incompatible = await buildReportingTokenNode({
+        message: {
+            reactionMessage: {},
+            messageContextInfo: {
+                messageSecret: new Uint8Array(32).fill(1)
+            }
+        },
+        stanzaId: 'msg-3',
+        senderUserJid: '551100000000@s.whatsapp.net',
+        remoteJid: '551188888888@s.whatsapp.net'
+    })
+    assert.equal(incompatible, null)
 })

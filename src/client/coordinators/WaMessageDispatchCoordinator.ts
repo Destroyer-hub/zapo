@@ -1,11 +1,17 @@
 import type { WaAppStateSyncKey } from '@appstate/types'
 import type { WaGroupEvent, WaSignalMessagePublishInput, WaSendMessageOptions } from '@client/types'
+import { randomBytesAsync, sha256 } from '@crypto'
 import { toSerializedPubKey } from '@crypto/core/keys'
 import type { Logger } from '@infra/log/types'
 import { resolveMessageTypeAttr } from '@message/content'
 import { wrapDeviceSentMessage } from '@message/device-sent'
 import { writeRandomPadMax16 } from '@message/padding'
 import { computePhashV2 } from '@message/phash'
+import {
+    buildReportingTokenArtifacts,
+    ensureMessageSecret,
+    type BuildReportingTokenArtifactsResult
+} from '@message/reporting-token'
 import type {
     WaEncryptedMessageInput,
     WaMessagePublishOptions,
@@ -44,7 +50,7 @@ import {
     buildGroupSenderKeyMessageNode
 } from '@transport/node/builders/message'
 import type { BinaryNode } from '@transport/types'
-import { bytesToHex, uint8Equal } from '@util/bytes'
+import { bytesToHex, concatBytes, TEXT_ENCODER, uint8Equal } from '@util/bytes'
 import { toError } from '@util/primitives'
 import { signalAddressKey } from '@util/signal-address'
 
@@ -234,23 +240,39 @@ export class WaMessageDispatchCoordinator {
     ): Promise<WaMessagePublishResult> {
         const recipientJid = normalizeRecipientJid(to)
         const message = await this.buildMessageContent(content)
-        const plaintext = await writeRandomPadMax16(proto.Message.encode(message).finish())
-        const type = resolveMessageTypeAttr(message)
+        const messageWithSecret = await ensureMessageSecret(message)
+        const sendOptions = await this.withResolvedMessageId(options)
+        const plaintext = await writeRandomPadMax16(
+            proto.Message.encode(messageWithSecret).finish()
+        )
+        const type = resolveMessageTypeAttr(messageWithSecret)
 
         if (isGroupJid(recipientJid)) {
-            if (this.shouldUseGroupDirectPath(message)) {
-                return this.publishGroupDirectMessage(recipientJid, plaintext, type, options)
+            if (this.shouldUseGroupDirectPath(messageWithSecret)) {
+                return this.publishGroupDirectMessage(
+                    recipientJid,
+                    messageWithSecret,
+                    plaintext,
+                    type,
+                    sendOptions
+                )
             }
-            return this.publishGroupSenderKeyMessage(recipientJid, plaintext, type, options)
+            return this.publishGroupSenderKeyMessage(
+                recipientJid,
+                messageWithSecret,
+                plaintext,
+                type,
+                sendOptions
+            )
         }
 
         const directRecipientJid = toUserJid(recipientJid)
         return this.publishDirectSignalMessageWithFanout(
             directRecipientJid,
-            message,
+            messageWithSecret,
             plaintext,
             type,
-            options
+            sendOptions
         )
     }
 
@@ -617,11 +639,13 @@ export class WaMessageDispatchCoordinator {
 
     private async publishGroupDirectMessage(
         groupJid: string,
+        message: Proto.IMessage,
         plaintext: Uint8Array,
         type: string,
         options: WaSendMessageOptions,
         retryContext: GroupSendRetryContext = {}
     ): Promise<WaMessagePublishResult> {
+        const sendOptions = await this.withResolvedMessageId(options)
         const meJid = this.requireCurrentMeJid('sendMessage')
         const participantUserJids = retryContext.forceRefreshParticipants
             ? await this.refreshGroupParticipantUsers(groupJid)
@@ -651,16 +675,24 @@ export class WaMessageDispatchCoordinator {
             (participant) => participant.encType === 'pkmsg'
         )
         const localPhash = await computePhashV2([...fanoutDeviceJids, senderForPhash])
+        const reportingArtifacts = await this.tryBuildReportingTokenArtifacts({
+            message,
+            stanzaId: sendOptions.id,
+            senderUserJid: toUserJid(senderForPhash),
+            remoteJid: groupJid,
+            context: 'group_direct'
+        })
         const messageNode = buildGroupDirectMessageNode({
             to: groupJid,
             type,
-            id: options.id,
+            id: sendOptions.id,
             phash: localPhash,
             addressingMode,
             participants,
             deviceIdentity: shouldAttachDeviceIdentity
                 ? this.getEncodedSignedDeviceIdentity()
-                : undefined
+                : undefined,
+            reportingNode: reportingArtifacts?.node ?? undefined
         })
         const replayPayload: WaRetryReplayPayload = {
             mode: 'plaintext',
@@ -670,12 +702,12 @@ export class WaMessageDispatchCoordinator {
         }
         const result = await this.publishWithRetryTracking(
             {
-                messageIdHint: options.id ?? messageNode.attrs.id,
+                messageIdHint: sendOptions.id ?? messageNode.attrs.id,
                 toJid: groupJid,
                 messageType: type,
                 replayPayload
             },
-            async () => this.messageClient.publishNode(messageNode, options)
+            async () => this.messageClient.publishNode(messageNode, sendOptions)
         )
         const ackError = result.ack.error
         const serverPhash = result.ack.phash
@@ -699,10 +731,11 @@ export class WaMessageDispatchCoordinator {
             })
             return this.publishGroupDirectMessage(
                 groupJid,
+                message,
                 plaintext,
                 type,
                 {
-                    ...options,
+                    ...sendOptions,
                     id: result.id
                 },
                 {
@@ -717,11 +750,13 @@ export class WaMessageDispatchCoordinator {
 
     private async publishGroupSenderKeyMessage(
         groupJid: string,
+        message: Proto.IMessage,
         plaintext: Uint8Array,
         type: string,
         options: WaSendMessageOptions,
         retryContext: GroupSendRetryContext = {}
     ): Promise<WaMessagePublishResult> {
+        const sendOptions = await this.withResolvedMessageId(options)
         const meJid = this.requireCurrentMeJid('sendMessage')
         const participantUserJids = retryContext.forceRefreshParticipants
             ? await this.refreshGroupParticipantUsers(groupJid)
@@ -749,17 +784,25 @@ export class WaMessageDispatchCoordinator {
             (participant) => participant.encType === 'pkmsg'
         )
         const localPhash = await computePhashV2([...fanoutDeviceJids, senderJid])
+        const reportingArtifacts = await this.tryBuildReportingTokenArtifacts({
+            message,
+            stanzaId: sendOptions.id,
+            senderUserJid: toUserJid(senderJid),
+            remoteJid: groupJid,
+            context: 'group_sender_key'
+        })
         const messageNode = buildGroupSenderKeyMessageNode({
             to: groupJid,
             type,
-            id: options.id,
+            id: sendOptions.id,
             phash: localPhash,
             addressingMode,
             groupCiphertext: groupCiphertext.ciphertext,
             participants: distributionParticipants,
             deviceIdentity: shouldAttachDeviceIdentity
                 ? this.getEncodedSignedDeviceIdentity()
-                : undefined
+                : undefined,
+            reportingNode: reportingArtifacts?.node ?? undefined
         })
 
         const replayPayload: WaRetryReplayPayload = {
@@ -770,12 +813,12 @@ export class WaMessageDispatchCoordinator {
         }
         const result = await this.publishWithRetryTracking(
             {
-                messageIdHint: options.id ?? messageNode.attrs.id,
+                messageIdHint: sendOptions.id ?? messageNode.attrs.id,
                 toJid: groupJid,
                 messageType: type,
                 replayPayload
             },
-            async () => this.messageClient.publishNode(messageNode, options)
+            async () => this.messageClient.publishNode(messageNode, sendOptions)
         )
         const distributedAddresses = distributionParticipants.map(
             (participant) => participant.address
@@ -815,10 +858,11 @@ export class WaMessageDispatchCoordinator {
             })
             return this.publishGroupSenderKeyMessage(
                 groupJid,
+                message,
                 plaintext,
                 type,
                 {
-                    ...options,
+                    ...sendOptions,
                     id: result.id
                 },
                 {
@@ -1174,6 +1218,7 @@ export class WaMessageDispatchCoordinator {
         type: string,
         options: WaSendMessageOptions
     ): Promise<WaMessagePublishResult> {
+        const sendOptions = await this.withResolvedMessageId(options)
         const meJid = this.requireCurrentMeJid('sendMessage')
         const meLid = this.getCurrentMeLid()
         const selfDeviceJidForRecipient = this.resolveSelfDeviceJidForRecipient(
@@ -1194,13 +1239,13 @@ export class WaMessageDispatchCoordinator {
             type
         })
         const expectedIdentityByJid = new Map<string, Uint8Array>()
-        if (options.expectedIdentity) {
+        if (sendOptions.expectedIdentity) {
             for (let index = 0; index < deviceJids.length; index += 1) {
                 const targetJid = deviceJids[index]
                 if (toUserJid(targetJid) === recipientUserJid) {
                     expectedIdentityByJid.set(
                         normalizeDeviceJid(targetJid),
-                        options.expectedIdentity
+                        sendOptions.expectedIdentity
                     )
                 }
             }
@@ -1225,7 +1270,7 @@ export class WaMessageDispatchCoordinator {
                 const address = parseSignalAddressFromJid(targetJid)
                 const targetUserJid = toUserJid(targetJid)
                 const expectedIdentity =
-                    targetUserJid === recipientUserJid ? options.expectedIdentity : undefined
+                    targetUserJid === recipientUserJid ? sendOptions.expectedIdentity : undefined
                 const plaintextForTarget =
                     selfDevicePlaintext && targetUserJid === meUserJid
                         ? selfDevicePlaintext
@@ -1250,12 +1295,20 @@ export class WaMessageDispatchCoordinator {
         const deviceIdentity = shouldAttachDeviceIdentity
             ? this.getEncodedSignedDeviceIdentity()
             : undefined
+        const reportingArtifacts = await this.tryBuildReportingTokenArtifacts({
+            message,
+            stanzaId: sendOptions.id,
+            senderUserJid: meUserJid,
+            remoteJid: recipientUserJid,
+            context: 'direct_fanout'
+        })
         const messageNode = buildDirectMessageFanoutNode({
             to: recipientJid,
             type,
-            id: options.id,
+            id: sendOptions.id,
             participants,
-            deviceIdentity
+            deviceIdentity,
+            reportingNode: reportingArtifacts?.node ?? undefined
         })
 
         const replayPayload: WaRetryReplayPayload = {
@@ -1266,12 +1319,12 @@ export class WaMessageDispatchCoordinator {
         }
         return this.publishWithRetryTracking(
             {
-                messageIdHint: options.id ?? messageNode.attrs.id,
+                messageIdHint: sendOptions.id ?? messageNode.attrs.id,
                 toJid: recipientJid,
                 messageType: type,
                 replayPayload
             },
-            async () => this.messageClient.publishNode(messageNode, options)
+            async () => this.messageClient.publishNode(messageNode, sendOptions)
         )
     }
 
@@ -1430,6 +1483,81 @@ export class WaMessageDispatchCoordinator {
             return meJid
         }
         return meLid
+    }
+
+    private async withResolvedMessageId(
+        options: WaSendMessageOptions
+    ): Promise<WaSendMessageOptions> {
+        const normalizedId = options.id?.trim()
+        if (normalizedId) {
+            if (normalizedId === options.id) {
+                return options
+            }
+            return {
+                ...options,
+                id: normalizedId
+            }
+        }
+
+        return {
+            ...options,
+            id: await this.generateOutgoingMessageId()
+        }
+    }
+
+    private async generateOutgoingMessageId(): Promise<string> {
+        try {
+            const meUserJid = toUserJid(this.requireCurrentMeJid('sendMessage'))
+            const timestampSeconds = Math.floor(Date.now() / 1_000)
+            const timestampBytes = new Uint8Array(8)
+            new DataView(
+                timestampBytes.buffer,
+                timestampBytes.byteOffset,
+                timestampBytes.byteLength
+            ).setBigUint64(0, BigInt(timestampSeconds), false)
+
+            const entropy = concatBytes([
+                timestampBytes,
+                TEXT_ENCODER.encode(meUserJid),
+                await randomBytesAsync(8)
+            ])
+            const digest = await sha256(entropy)
+            return `3EB0${bytesToHex(digest.subarray(0, 9)).toUpperCase()}`
+        } catch (error) {
+            this.logger.warn('failed to generate sha256 message id, falling back to random id', {
+                message: toError(error).message
+            })
+            return `3EB0${bytesToHex(await randomBytesAsync(8)).toUpperCase()}`
+        }
+    }
+
+    private async tryBuildReportingTokenArtifacts(input: {
+        readonly message: Proto.IMessage
+        readonly stanzaId?: string
+        readonly senderUserJid: string
+        readonly remoteJid: string
+        readonly context: string
+    }): Promise<BuildReportingTokenArtifactsResult | null> {
+        if (!input.stanzaId) {
+            return null
+        }
+
+        try {
+            return await buildReportingTokenArtifacts({
+                message: input.message,
+                stanzaId: input.stanzaId,
+                senderUserJid: input.senderUserJid,
+                remoteJid: input.remoteJid
+            })
+        } catch (error) {
+            this.logger.warn('failed to generate reporting token', {
+                context: input.context,
+                id: input.stanzaId,
+                remoteJid: input.remoteJid,
+                message: toError(error).message
+            })
+            return null
+        }
     }
 
     private getEncodedSignedDeviceIdentity(): Uint8Array {

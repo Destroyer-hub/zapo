@@ -13,6 +13,7 @@ interface BuildDirectMessageFanoutNodeInput {
     readonly id?: string
     readonly participants: readonly EncryptedParticipant[]
     readonly deviceIdentity?: Uint8Array
+    readonly reportingNode?: BinaryNode
 }
 
 interface BuildGroupSenderKeyMessageNodeInput {
@@ -24,6 +25,7 @@ interface BuildGroupSenderKeyMessageNodeInput {
     readonly addressingMode?: 'pn' | 'lid'
     readonly participants: readonly EncryptedParticipant[]
     readonly deviceIdentity?: Uint8Array
+    readonly reportingNode?: BinaryNode
 }
 
 interface BuildGroupDirectMessageNodeInput {
@@ -34,6 +36,7 @@ interface BuildGroupDirectMessageNodeInput {
     readonly addressingMode?: 'pn' | 'lid'
     readonly participants: readonly EncryptedParticipant[]
     readonly deviceIdentity?: Uint8Array
+    readonly reportingNode?: BinaryNode
 }
 
 interface BuildGroupRetryMessageNodeInput {
@@ -88,6 +91,9 @@ export function buildDirectMessageFanoutNode(input: BuildDirectMessageFanoutNode
             attrs: {},
             content: input.deviceIdentity
         })
+    }
+    if (input.reportingNode) {
+        content.push(input.reportingNode)
     }
 
     return {
@@ -152,6 +158,9 @@ export function buildGroupSenderKeyMessageNode(
             content: input.deviceIdentity
         })
     }
+    if (input.reportingNode) {
+        content.push(input.reportingNode)
+    }
 
     return {
         tag: WA_MESSAGE_TAGS.MESSAGE,
@@ -207,6 +216,9 @@ export function buildGroupDirectMessageNode(input: BuildGroupDirectMessageNodeIn
             attrs: {},
             content: input.deviceIdentity
         })
+    }
+    if (input.reportingNode) {
+        content.push(input.reportingNode)
     }
 
     return {
