@@ -29,6 +29,12 @@ export class WaMessageMemoryStore implements Contract {
         setBoundedMapEntry(this.messages, record.id, record, this.maxMessages)
     }
 
+    public async upsertBatch(records: readonly WaStoredMessageRecord[]): Promise<void> {
+        for (const record of records) {
+            setBoundedMapEntry(this.messages, record.id, record, this.maxMessages)
+        }
+    }
+
     public async getById(id: string): Promise<WaStoredMessageRecord | null> {
         return this.messages.get(id) ?? null
     }

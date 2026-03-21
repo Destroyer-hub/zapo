@@ -3,6 +3,7 @@ import type {
     WaStoredContactRecord
 } from '@store/contracts/contact.store'
 import { BaseSqliteStore } from '@store/providers/sqlite/BaseSqliteStore'
+import type { WaSqliteConnection } from '@store/providers/sqlite/connection'
 import type { WaSqliteStorageOptions } from '@store/types'
 import { asNumber, asOptionalString, asString } from '@util/coercion'
 
@@ -33,32 +34,18 @@ export class WaContactSqliteStore extends BaseSqliteStore implements Contract {
 
     public async upsert(record: WaStoredContactRecord): Promise<void> {
         const db = await this.getConnection()
-        db.run(
-            `INSERT INTO mailbox_contacts (
-                session_id,
-                jid,
-                display_name,
-                push_name,
-                lid,
-                phone_number,
-                last_updated_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, jid) DO UPDATE SET
-                display_name=COALESCE(excluded.display_name, mailbox_contacts.display_name),
-                push_name=COALESCE(excluded.push_name, mailbox_contacts.push_name),
-                lid=COALESCE(excluded.lid, mailbox_contacts.lid),
-                phone_number=COALESCE(excluded.phone_number, mailbox_contacts.phone_number),
-                last_updated_ms=excluded.last_updated_ms`,
-            [
-                this.options.sessionId,
-                record.jid,
-                record.displayName ?? null,
-                record.pushName ?? null,
-                record.lid ?? null,
-                record.phoneNumber ?? null,
-                record.lastUpdatedMs
-            ]
-        )
+        this.upsertContactRow(db, record)
+    }
+
+    public async upsertBatch(records: readonly WaStoredContactRecord[]): Promise<void> {
+        if (records.length === 0) {
+            return
+        }
+        await this.withTransaction((db) => {
+            for (const record of records) {
+                this.upsertContactRow(db, record)
+            }
+        })
     }
 
     public async getByJid(jid: string): Promise<WaStoredContactRecord | null> {
@@ -86,5 +73,34 @@ export class WaContactSqliteStore extends BaseSqliteStore implements Contract {
     public async clear(): Promise<void> {
         const db = await this.getConnection()
         db.run('DELETE FROM mailbox_contacts WHERE session_id = ?', [this.options.sessionId])
+    }
+
+    private upsertContactRow(db: WaSqliteConnection, record: WaStoredContactRecord): void {
+        db.run(
+            `INSERT INTO mailbox_contacts (
+                session_id,
+                jid,
+                display_name,
+                push_name,
+                lid,
+                phone_number,
+                last_updated_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, jid) DO UPDATE SET
+                display_name=COALESCE(excluded.display_name, mailbox_contacts.display_name),
+                push_name=COALESCE(excluded.push_name, mailbox_contacts.push_name),
+                lid=COALESCE(excluded.lid, mailbox_contacts.lid),
+                phone_number=COALESCE(excluded.phone_number, mailbox_contacts.phone_number),
+                last_updated_ms=excluded.last_updated_ms`,
+            [
+                this.options.sessionId,
+                record.jid,
+                record.displayName ?? null,
+                record.pushName ?? null,
+                record.lid ?? null,
+                record.phoneNumber ?? null,
+                record.lastUpdatedMs
+            ]
+        )
     }
 }

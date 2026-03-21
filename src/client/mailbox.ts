@@ -24,9 +24,8 @@ async function persistContacts(
         return
     }
 
-    await Promise.all(
-        [...new Set(candidateJids)].map((jid) => contactStore.upsert({ jid, lastUpdatedMs: nowMs }))
-    )
+    const contacts = [...new Set(candidateJids)].map((jid) => ({ jid, lastUpdatedMs: nowMs }))
+    await contactStore.upsertBatch(contacts)
 }
 
 export async function persistIncomingMailboxEntities(

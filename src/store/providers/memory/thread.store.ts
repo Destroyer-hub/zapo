@@ -26,6 +26,12 @@ export class WaThreadMemoryStore implements Contract {
         setBoundedMapEntry(this.threads, record.jid, record, this.maxThreads)
     }
 
+    public async upsertBatch(records: readonly WaStoredThreadRecord[]): Promise<void> {
+        for (const record of records) {
+            setBoundedMapEntry(this.threads, record.jid, record, this.maxThreads)
+        }
+    }
+
     public async getByJid(jid: string): Promise<WaStoredThreadRecord | null> {
         return this.threads.get(jid) ?? null
     }

@@ -9,10 +9,6 @@ export interface WaSenderKeyStore {
         readonly skDistribList: readonly SenderKeyDistributionRecord[]
     }>
     getDeviceSenderKey(groupId: string, sender: SignalAddress): Promise<SenderKeyRecord | null>
-    getDeviceSenderKeyDistribution(
-        groupId: string,
-        sender: SignalAddress
-    ): Promise<SenderKeyDistributionRecord | null>
     getDeviceSenderKeyDistributions(
         groupId: string,
         senders: readonly SignalAddress[]

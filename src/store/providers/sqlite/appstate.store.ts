@@ -18,10 +18,21 @@ import type {
 } from '@store/contracts/appstate.store'
 import { BaseSqliteStore } from '@store/providers/sqlite/BaseSqliteStore'
 import type { WaSqliteStorageOptions } from '@store/types'
-import { uint8Equal } from '@util/bytes'
+import { bytesToHex, uint8Equal } from '@util/bytes'
 import { asBytes, asNumber, asString } from '@util/coercion'
 
 type SqliteRow = Readonly<Record<string, unknown>>
+
+function repeatSqlToken(token: string, count: number, separator: string): string {
+    if (count <= 1) {
+        return token
+    }
+    let out = token
+    for (let index = 1; index < count; index += 1) {
+        out += separator + token
+    }
+    return out
+}
 
 export class WaAppStateSqliteStore extends BaseSqliteStore implements WaAppStateStore {
     public constructor(options: WaSqliteStorageOptions) {
@@ -137,6 +148,34 @@ export class WaAppStateSqliteStore extends BaseSqliteStore implements WaAppState
         return asBytes(row.key_data, 'appstate_sync_keys.key_data')
     }
 
+    public async getSyncKeyDataBatch(
+        keyIds: readonly Uint8Array[]
+    ): Promise<readonly (Uint8Array | null)[]> {
+        if (keyIds.length === 0) {
+            return []
+        }
+        const db = await this.getConnection()
+        const uniqueKeyIds = [
+            ...new Map(keyIds.map((keyId) => [bytesToHex(keyId), keyId])).values()
+        ]
+        const placeholders = repeatSqlToken('?', uniqueKeyIds.length, ', ')
+        const params: unknown[] = [this.options.sessionId, ...uniqueKeyIds]
+        const rows = db.all<SqliteRow>(
+            `SELECT key_id, key_data
+             FROM appstate_sync_keys
+             WHERE session_id = ? AND key_id IN (${placeholders})`,
+            params
+        )
+        const byKeyHex = new Map<string, Uint8Array>()
+        for (const row of rows) {
+            byKeyHex.set(
+                bytesToHex(asBytes(row.key_id, 'appstate_sync_keys.key_id')),
+                asBytes(row.key_data, 'appstate_sync_keys.key_data')
+            )
+        }
+        return keyIds.map((keyId) => byKeyHex.get(bytesToHex(keyId)) ?? null)
+    }
+
     public async getActiveSyncKey(): Promise<WaAppStateSyncKey | null> {
         const db = await this.getConnection()
         const rows = db.all<SqliteRow>(
@@ -198,6 +237,80 @@ export class WaAppStateSqliteStore extends BaseSqliteStore implements WaAppState
             hash: asBytes(versionRow.hash, 'appstate_collection_versions.hash'),
             indexValueMap
         }
+    }
+
+    public async getCollectionStates(
+        collections: readonly AppStateCollectionName[]
+    ): Promise<readonly WaAppStateCollectionStoreState[]> {
+        if (collections.length === 0) {
+            return []
+        }
+        const db = await this.getConnection()
+        const uniqueCollections = [...new Set(collections)]
+        const placeholders = repeatSqlToken('?', uniqueCollections.length, ', ')
+        const params: unknown[] = [this.options.sessionId, ...uniqueCollections]
+        const versionRows = db.all<SqliteRow>(
+            `SELECT collection, version, hash
+             FROM appstate_collection_versions
+             WHERE session_id = ? AND collection IN (${placeholders})`,
+            params
+        )
+        const valueRows = db.all<SqliteRow>(
+            `SELECT collection, index_mac_hex, value_mac
+             FROM appstate_collection_index_values
+             WHERE session_id = ? AND collection IN (${placeholders})`,
+            params
+        )
+
+        const versionsByCollection = new Map<
+            AppStateCollectionName,
+            { readonly version: number; readonly hash: Uint8Array }
+        >()
+        for (const row of versionRows) {
+            const collection = asString(
+                row.collection,
+                'appstate_collection_versions.collection'
+            ) as AppStateCollectionName
+            versionsByCollection.set(collection, {
+                version: asNumber(row.version, 'appstate_collection_versions.version'),
+                hash: asBytes(row.hash, 'appstate_collection_versions.hash')
+            })
+        }
+
+        const indexValueMaps = new Map<AppStateCollectionName, Map<string, Uint8Array>>()
+        for (const row of valueRows) {
+            const collection = asString(
+                row.collection,
+                'appstate_collection_index_values.collection'
+            ) as AppStateCollectionName
+            const map = indexValueMaps.get(collection)
+            const targetMap = map ?? new Map<string, Uint8Array>()
+            targetMap.set(
+                asString(row.index_mac_hex, 'appstate_collection_index_values.index_mac_hex'),
+                asBytes(row.value_mac, 'appstate_collection_index_values.value_mac')
+            )
+            if (!map) {
+                indexValueMaps.set(collection, targetMap)
+            }
+        }
+
+        return collections.map((collection) => {
+            const version = versionsByCollection.get(collection)
+            if (!version) {
+                return {
+                    initialized: false,
+                    version: 0,
+                    hash: APP_STATE_EMPTY_LT_HASH,
+                    indexValueMap: new Map()
+                }
+            }
+            return {
+                initialized: true,
+                version: version.version,
+                hash: version.hash,
+                indexValueMap: indexValueMaps.get(collection) ?? new Map()
+            }
+        })
     }
 
     public async setCollectionStates(

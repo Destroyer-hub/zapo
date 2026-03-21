@@ -35,41 +35,19 @@ export class WaDeviceListMemoryStore implements WaDeviceListStore {
         this.cleanupTimer.unref()
     }
 
-    public getTtlMs(): number {
-        return this.ttlMs
-    }
-
-    public async upsertUserDevices(snapshot: WaDeviceListSnapshot): Promise<void> {
-        setBoundedMapEntry(
-            this.records,
-            snapshot.userJid,
-            {
-                ...snapshot,
-                expiresAtMs: snapshot.updatedAtMs + this.ttlMs
-            },
-            this.maxUsers
-        )
-    }
-
     public async upsertUserDevicesBatch(snapshots: readonly WaDeviceListSnapshot[]): Promise<void> {
-        for (const snapshot of snapshots) {
-            await this.upsertUserDevices(snapshot)
+        for (let index = 0; index < snapshots.length; index += 1) {
+            const snapshot = snapshots[index]
+            setBoundedMapEntry(
+                this.records,
+                snapshot.userJid,
+                {
+                    ...snapshot,
+                    expiresAtMs: snapshot.updatedAtMs + this.ttlMs
+                },
+                this.maxUsers
+            )
         }
-    }
-
-    public async getUserDevices(
-        userJid: string,
-        nowMs = Date.now()
-    ): Promise<WaDeviceListSnapshot | null> {
-        const record = this.records.get(userJid)
-        if (!record) {
-            return null
-        }
-        if (record.expiresAtMs <= nowMs) {
-            this.records.delete(userJid)
-            return null
-        }
-        return record
     }
 
     public async getUserDevicesBatch(

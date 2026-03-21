@@ -5,7 +5,6 @@ export interface WaParticipantsSnapshot {
 }
 
 export interface WaParticipantsStore {
-    getTtlMs(): number
     destroy?(): Promise<void>
     upsertGroupParticipants(snapshot: WaParticipantsSnapshot): Promise<void>
     getGroupParticipants(groupJid: string, nowMs?: number): Promise<WaParticipantsSnapshot | null>

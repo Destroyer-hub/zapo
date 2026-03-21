@@ -78,6 +78,9 @@ test('history sync processor persists conversations and emits chunk event', asyn
     const threads: unknown[] = []
     const contacts: unknown[] = []
     const emitted: unknown[] = []
+    let messageBatchCalls = 0
+    let threadBatchCalls = 0
+    let contactBatchCalls = 0
 
     await processHistorySyncNotification(
         {
@@ -88,18 +91,21 @@ test('history sync processor persists conversations and emits chunk event', asyn
                 }
             } as never,
             messageStore: {
-                upsert: async (record: unknown) => {
-                    messages.push(record)
+                upsertBatch: async (records: readonly unknown[]) => {
+                    messageBatchCalls += 1
+                    messages.push(...records)
                 }
             } as never,
             threadStore: {
-                upsert: async (record: unknown) => {
-                    threads.push(record)
+                upsertBatch: async (records: readonly unknown[]) => {
+                    threadBatchCalls += 1
+                    threads.push(...records)
                 }
             } as never,
             contactStore: {
-                upsert: async (record: unknown) => {
-                    contacts.push(record)
+                upsertBatch: async (records: readonly unknown[]) => {
+                    contactBatchCalls += 1
+                    contacts.push(...records)
                 }
             } as never,
             emitEvent: (_event, payload) => {
@@ -115,6 +121,9 @@ test('history sync processor persists conversations and emits chunk event', asyn
     assert.equal(messages.length, 1)
     assert.equal(threads.length, 1)
     assert.equal(contacts.length, 1)
+    assert.equal(messageBatchCalls, 1)
+    assert.equal(threadBatchCalls, 1)
+    assert.equal(contactBatchCalls, 1)
     assert.equal(emitted.length, 1)
     assert.equal((emitted[0] as { messagesCount: number }).messagesCount, 1)
 })

@@ -39,6 +39,20 @@ interface SignalSessionExistsRow extends Record<string, unknown> {
     readonly device: unknown
 }
 
+interface SignalSessionBatchRow extends Record<string, unknown> {
+    readonly user: unknown
+    readonly server: unknown
+    readonly device: unknown
+    readonly record: unknown
+}
+
+interface SignalIdentityBatchRow extends Record<string, unknown> {
+    readonly user: unknown
+    readonly server: unknown
+    readonly device: unknown
+    readonly identity_key: unknown
+}
+
 const DEFAULTS = Object.freeze({
     preKeyBatchSize: 500,
     hasSessionBatchSize: 250
@@ -398,27 +412,69 @@ export class WaSignalSqliteStore extends BaseSqliteStore implements WaSignalStor
         return row ? decodeSignalSessionRecord(row.record) : null
     }
 
+    public async getSessionsBatch(
+        addresses: readonly SignalAddress[]
+    ): Promise<readonly (SignalSessionRecord | null)[]> {
+        if (addresses.length === 0) {
+            return []
+        }
+        const db = await this.getConnection()
+        const targets = addresses.map((address) => toSignalAddressParts(address))
+        const byAddressKey = new Map<string, SignalSessionRecord>()
+        for (let start = 0; start < targets.length; start += this.hasSessionBatchSize) {
+            const end = Math.min(start + this.hasSessionBatchSize, targets.length)
+            const batchLength = end - start
+            const filters = repeatSqlToken(
+                '(user = ? AND server = ? AND device = ?)',
+                batchLength,
+                ' OR '
+            )
+            const params: unknown[] = [this.options.sessionId]
+            for (let index = start; index < end; index += 1) {
+                const target = targets[index]
+                params.push(target.user, target.server, target.device)
+            }
+            const rows = db.all<SignalSessionBatchRow>(
+                `SELECT user, server, device, record
+                 FROM signal_session
+                 WHERE session_id = ? AND (${filters})`,
+                params
+            )
+            for (const row of rows) {
+                byAddressKey.set(
+                    signalAddressKey({
+                        user: asString(row.user, 'signal_session.user'),
+                        server: asString(row.server, 'signal_session.server'),
+                        device: asNumber(row.device, 'signal_session.device')
+                    }),
+                    decodeSignalSessionRecord(row.record)
+                )
+            }
+        }
+        return targets.map((target) => byAddressKey.get(signalAddressKey(target)) ?? null)
+    }
+
     public async setSession(address: SignalAddress, session: SignalSessionRecord): Promise<void> {
         const db = await this.getConnection()
         const target = toSignalAddressParts(address)
-        db.run(
-            `INSERT INTO signal_session (
-                session_id,
-                user,
-                server,
-                device,
-                record
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, user, server, device) DO UPDATE SET
-                record=excluded.record`,
-            [
-                this.options.sessionId,
-                target.user,
-                target.server,
-                target.device,
-                encodeSignalSessionRecord(session)
-            ]
-        )
+        this.upsertSession(db, target, session)
+    }
+
+    public async setSessionsBatch(
+        entries: readonly {
+            readonly address: SignalAddress
+            readonly session: SignalSessionRecord
+        }[]
+    ): Promise<void> {
+        if (entries.length === 0) {
+            return
+        }
+        await this.withTransaction((db) => {
+            for (let index = 0; index < entries.length; index += 1) {
+                const entry = entries[index]
+                this.upsertSession(db, toSignalAddressParts(entry.address), entry.session)
+            }
+        })
     }
 
     public async deleteSession(address: SignalAddress): Promise<void> {
@@ -441,6 +497,48 @@ export class WaSignalSqliteStore extends BaseSqliteStore implements WaSignalStor
             [this.options.sessionId, target.user, target.server, target.device]
         )
         return row ? decodeSignalRemoteIdentity(row.identity_key) : null
+    }
+
+    public async getRemoteIdentities(
+        addresses: readonly SignalAddress[]
+    ): Promise<readonly (Uint8Array | null)[]> {
+        if (addresses.length === 0) {
+            return []
+        }
+        const db = await this.getConnection()
+        const targets = addresses.map((address) => toSignalAddressParts(address))
+        const byAddressKey = new Map<string, Uint8Array>()
+        for (let start = 0; start < targets.length; start += this.hasSessionBatchSize) {
+            const end = Math.min(start + this.hasSessionBatchSize, targets.length)
+            const batchLength = end - start
+            const filters = repeatSqlToken(
+                '(user = ? AND server = ? AND device = ?)',
+                batchLength,
+                ' OR '
+            )
+            const params: unknown[] = [this.options.sessionId]
+            for (let index = start; index < end; index += 1) {
+                const target = targets[index]
+                params.push(target.user, target.server, target.device)
+            }
+            const rows = db.all<SignalIdentityBatchRow>(
+                `SELECT user, server, device, identity_key
+                 FROM signal_identity
+                 WHERE session_id = ? AND (${filters})`,
+                params
+            )
+            for (const row of rows) {
+                byAddressKey.set(
+                    signalAddressKey({
+                        user: asString(row.user, 'signal_identity.user'),
+                        server: asString(row.server, 'signal_identity.server'),
+                        device: asNumber(row.device, 'signal_identity.device')
+                    }),
+                    decodeSignalRemoteIdentity(row.identity_key)
+                )
+            }
+        }
+        return targets.map((target) => byAddressKey.get(signalAddressKey(target)) ?? null)
     }
 
     public async setRemoteIdentity(address: SignalAddress, identityKey: Uint8Array): Promise<void> {
@@ -498,6 +596,31 @@ export class WaSignalSqliteStore extends BaseSqliteStore implements WaSignalStor
                 record.keyPair.pubKey,
                 record.keyPair.privKey,
                 record.uploaded === true ? 1 : 0
+            ]
+        )
+    }
+
+    private upsertSession(
+        db: WaSqliteConnection,
+        target: ReturnType<typeof toSignalAddressParts>,
+        session: SignalSessionRecord
+    ): void {
+        db.run(
+            `INSERT INTO signal_session (
+                session_id,
+                user,
+                server,
+                device,
+                record
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, user, server, device) DO UPDATE SET
+                record=excluded.record`,
+            [
+                this.options.sessionId,
+                target.user,
+                target.server,
+                target.device,
+                encodeSignalSessionRecord(session)
             ]
         )
     }

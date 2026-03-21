@@ -122,6 +122,12 @@ export class WaAppStateMemoryStore implements WaAppStateStore {
         return this.keys.get(bytesToHex(keyId))?.keyData ?? null
     }
 
+    public async getSyncKeyDataBatch(
+        keyIds: readonly Uint8Array[]
+    ): Promise<readonly (Uint8Array | null)[]> {
+        return keyIds.map((keyId) => this.keys.get(bytesToHex(keyId))?.keyData ?? null)
+    }
+
     public async getActiveSyncKey(): Promise<WaAppStateSyncKey | null> {
         return pickActiveSyncKey(this.keys.values())
     }
@@ -140,6 +146,27 @@ export class WaAppStateMemoryStore implements WaAppStateStore {
             this.collections.set(collection, state)
         }
         return state
+    }
+
+    public async getCollectionStates(
+        collections: readonly AppStateCollectionName[]
+    ): Promise<readonly WaAppStateCollectionStoreState[]> {
+        const result = new Array<WaAppStateCollectionStoreState>(collections.length)
+        for (let index = 0; index < collections.length; index += 1) {
+            const collection = collections[index]
+            let state = this.collections.get(collection)
+            if (!state) {
+                state = {
+                    initialized: false,
+                    version: 0,
+                    hash: APP_STATE_EMPTY_LT_HASH,
+                    indexValueMap: new Map()
+                }
+                this.collections.set(collection, state)
+            }
+            result[index] = state
+        }
+        return result
     }
 
     public async setCollectionStates(

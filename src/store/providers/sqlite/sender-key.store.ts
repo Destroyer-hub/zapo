@@ -131,25 +131,6 @@ export class SenderKeySqliteStore extends BaseSqliteStore implements WaSenderKey
         })
     }
 
-    public async getDeviceSenderKeyDistribution(
-        groupId: string,
-        sender: SignalAddress
-    ): Promise<SenderKeyDistributionRecord | null> {
-        const db = await this.getConnection()
-        const target = toSignalAddressParts(sender)
-        const row = db.get<SenderKeyDistributionRow>(
-            `SELECT group_id, sender_user, sender_server, sender_device, key_id, timestamp_ms
-             FROM sender_key_distribution
-             WHERE session_id = ?
-               AND group_id = ?
-               AND sender_user = ?
-               AND sender_server = ?
-               AND sender_device = ?`,
-            [this.options.sessionId, groupId, target.user, target.server, target.device]
-        )
-        return row ? decodeSenderKeyDistributionRow(row) : null
-    }
-
     public async getDeviceSenderKeyDistributions(
         groupId: string,
         senders: readonly SignalAddress[]

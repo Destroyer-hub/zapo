@@ -121,6 +121,11 @@ test('sqlite appstate store handles sync keys, collection state and session scop
         assert.equal(await storeA.upsertSyncKeys([keyLow, keyHigh]), 2)
         assert.equal(await storeA.upsertSyncKeys([keyLow]), 0)
         assert.deepEqual(await storeA.getSyncKeyData(keyHigh.keyId), keyHigh.keyData)
+        assert.deepEqual(await storeA.getSyncKeyDataBatch([]), [])
+        assert.deepEqual(
+            await storeA.getSyncKeyDataBatch([keyHigh.keyId, makeBytes(8, 9), keyHigh.keyId]),
+            [keyHigh.keyData, null, keyHigh.keyData]
+        )
         assert.equal(await storeA.getSyncKeyData(makeBytes(8, 9)), null)
 
         const activeKey = await storeA.getActiveSyncKey()
@@ -145,6 +150,14 @@ test('sqlite appstate store handles sync keys, collection state and session scop
         assert.equal(regularState.version, 11)
         assert.equal(regularState.indexValueMap.size, 2)
         assert.deepEqual(regularState.indexValueMap.get('aa'), makeBytes(8, 1))
+        const batchStates = await storeA.getCollectionStates([
+            WA_APP_STATE_COLLECTIONS.REGULAR,
+            WA_APP_STATE_COLLECTIONS.CRITICAL_BLOCK
+        ])
+        assert.equal(batchStates.length, 2)
+        assert.equal(batchStates[0].initialized, true)
+        assert.equal(batchStates[0].version, 11)
+        assert.equal(batchStates[1].initialized, false)
 
         const exported = await storeA.exportData()
         assert.equal(exported.keys.length, 2)
@@ -179,14 +192,13 @@ test('sqlite device-list and participants stores cover batch, expiry, cleanup an
     )
 
     try {
-        assert.equal(deviceStore.getTtlMs(), 100)
-        assert.equal(participantsStore.getTtlMs(), 100)
-
-        await deviceStore.upsertUserDevices({
-            userJid: '5511@s.whatsapp.net',
-            deviceJids: ['5511@s.whatsapp.net', '5511:1@s.whatsapp.net'],
-            updatedAtMs: 1000
-        })
+        await deviceStore.upsertUserDevicesBatch([
+            {
+                userJid: '5511@s.whatsapp.net',
+                deviceJids: ['5511@s.whatsapp.net', '5511:1@s.whatsapp.net'],
+                updatedAtMs: 1000
+            }
+        ])
         await deviceStore.upsertUserDevicesBatch([
             {
                 userJid: '5522@s.whatsapp.net',
@@ -201,7 +213,7 @@ test('sqlite device-list and participants stores cover batch, expiry, cleanup an
         ])
         await deviceStore.upsertUserDevicesBatch([])
 
-        const activeDevices = await deviceStore.getUserDevices('5511@s.whatsapp.net', 1050)
+        const [activeDevices] = await deviceStore.getUserDevicesBatch(['5511@s.whatsapp.net'], 1050)
         assert.ok(activeDevices)
         assert.equal(activeDevices?.deviceJids.length, 2)
 
@@ -213,17 +225,18 @@ test('sqlite device-list and participants stores cover batch, expiry, cleanup an
         assert.equal(deviceBatch[1], null)
         assert.equal(deviceBatch[2], null)
 
-        assert.equal(await deviceStore.deleteUserDevices('missing@s.whatsapp.net'), 0)
         assert.equal(await deviceStore.cleanupExpired(1_200), 2)
         await deviceStore.clear()
         assert.equal((await deviceStore.getUserDevicesBatch([])).length, 0)
 
         const deviceDb = await asConnection(deviceStore)
-        await deviceStore.upsertUserDevices({
-            userJid: 'broken@s.whatsapp.net',
-            deviceJids: ['broken@s.whatsapp.net'],
-            updatedAtMs: 2000
-        })
+        await deviceStore.upsertUserDevicesBatch([
+            {
+                userJid: 'broken@s.whatsapp.net',
+                deviceJids: ['broken@s.whatsapp.net'],
+                updatedAtMs: 2000
+            }
+        ])
         deviceDb.run(
             `UPDATE device_list_cache
              SET device_jids_json = ?
@@ -231,7 +244,7 @@ test('sqlite device-list and participants stores cover batch, expiry, cleanup an
             ['{"invalid":true}', 'session-a', 'broken@s.whatsapp.net']
         )
         await assert.rejects(
-            () => deviceStore.getUserDevices('broken@s.whatsapp.net', 2_001),
+            () => deviceStore.getUserDevicesBatch(['broken@s.whatsapp.net'], 2_001),
             /device_jids_json must be an array/
         )
 
@@ -369,7 +382,7 @@ test('sqlite sender-key store handles lists, batching and deletions', async () =
         assert.equal(deviceKey?.keyId, 1)
         assert.equal(await store.getDeviceSenderKey(groupId, makeAddress('missing', 0)), null)
 
-        const distribution = await store.getDeviceSenderKeyDistribution(groupId, senderB)
+        const [distribution] = await store.getDeviceSenderKeyDistributions(groupId, [senderB])
         assert.ok(distribution)
         assert.equal(distribution?.keyId, 2)
 
@@ -480,12 +493,24 @@ test('sqlite signal store covers prekeys, sessions, identities and state helpers
         assert.equal(await store.hasSession(sessionAddressA), true)
         assert.deepEqual(await store.hasSessions([]), [])
         assert.deepEqual(await store.hasSessions([sessionAddressA, sessionAddressB]), [true, false])
+        assert.deepEqual(await store.getSessionsBatch([]), [])
+        assert.deepEqual(await store.getSessionsBatch([sessionAddressA, sessionAddressB]), [
+            sessionRecord,
+            null
+        ])
+        const sessionRecordB = await makeSessionRecord(2)
+        await store.setSessionsBatch([{ address: sessionAddressB, session: sessionRecordB }])
+        assert.deepEqual(await store.getSessionsBatch([sessionAddressA, sessionAddressB]), [
+            sessionRecord,
+            sessionRecordB
+        ])
         assert.ok(await store.getSession(sessionAddressA))
         await store.deleteSession(sessionAddressA)
         assert.equal(await store.getSession(sessionAddressA), null)
 
         await store.setRemoteIdentity(sessionAddressA, makeBytes(33, 20))
         assert.deepEqual(await store.getRemoteIdentity(sessionAddressA), makeBytes(33, 20))
+        assert.deepEqual(await store.getRemoteIdentities([]), [])
         await store.setRemoteIdentities([])
         await store.setRemoteIdentities([
             { address: sessionAddressA, identityKey: makeBytes(33, 21) },
@@ -493,6 +518,10 @@ test('sqlite signal store covers prekeys, sessions, identities and state helpers
         ])
         assert.deepEqual(await store.getRemoteIdentity(sessionAddressA), makeBytes(33, 21))
         assert.deepEqual(await store.getRemoteIdentity(sessionAddressB), makeBytes(33, 22))
+        assert.deepEqual(
+            await store.getRemoteIdentities([sessionAddressA, sessionAddressB, sessionAddressA]),
+            [makeBytes(33, 21), makeBytes(33, 22), makeBytes(33, 21)]
+        )
     } finally {
         await Promise.all([store.destroy(), storeB.destroy()])
         await rm(dir, { recursive: true, force: true })

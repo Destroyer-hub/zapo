@@ -3,6 +3,7 @@ import type {
     WaStoredMessageRecord
 } from '@store/contracts/message.store'
 import { BaseSqliteStore } from '@store/providers/sqlite/BaseSqliteStore'
+import type { WaSqliteConnection } from '@store/providers/sqlite/connection'
 import type { WaSqliteStorageOptions } from '@store/types'
 import { asOptionalBytes, asOptionalNumber, asOptionalString, asString } from '@util/coercion'
 import { normalizeQueryLimit } from '@util/collections'
@@ -40,41 +41,18 @@ export class WaMessageSqliteStore extends BaseSqliteStore implements Contract {
 
     public async upsert(record: WaStoredMessageRecord): Promise<void> {
         const db = await this.getConnection()
-        db.run(
-            `INSERT INTO mailbox_messages (
-                session_id,
-                message_id,
-                thread_jid,
-                sender_jid,
-                participant_jid,
-                from_me,
-                timestamp_ms,
-                enc_type,
-                plaintext,
-                message_bytes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, message_id) DO UPDATE SET
-                thread_jid=excluded.thread_jid,
-                sender_jid=excluded.sender_jid,
-                participant_jid=excluded.participant_jid,
-                from_me=excluded.from_me,
-                timestamp_ms=excluded.timestamp_ms,
-                enc_type=excluded.enc_type,
-                plaintext=excluded.plaintext,
-                message_bytes=excluded.message_bytes`,
-            [
-                this.options.sessionId,
-                record.id,
-                record.threadJid,
-                record.senderJid ?? null,
-                record.participantJid ?? null,
-                record.fromMe ? 1 : 0,
-                record.timestampMs ?? null,
-                record.encType ?? null,
-                record.plaintext ?? null,
-                record.messageBytes ?? null
-            ]
-        )
+        this.upsertMessageRow(db, record)
+    }
+
+    public async upsertBatch(records: readonly WaStoredMessageRecord[]): Promise<void> {
+        if (records.length === 0) {
+            return
+        }
+        await this.withTransaction((db) => {
+            for (const record of records) {
+                this.upsertMessageRow(db, record)
+            }
+        })
     }
 
     public async getById(id: string): Promise<WaStoredMessageRecord | null> {
@@ -160,5 +138,43 @@ export class WaMessageSqliteStore extends BaseSqliteStore implements Contract {
     public async clear(): Promise<void> {
         const db = await this.getConnection()
         db.run('DELETE FROM mailbox_messages WHERE session_id = ?', [this.options.sessionId])
+    }
+
+    private upsertMessageRow(db: WaSqliteConnection, record: WaStoredMessageRecord): void {
+        db.run(
+            `INSERT INTO mailbox_messages (
+                session_id,
+                message_id,
+                thread_jid,
+                sender_jid,
+                participant_jid,
+                from_me,
+                timestamp_ms,
+                enc_type,
+                plaintext,
+                message_bytes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, message_id) DO UPDATE SET
+                thread_jid=excluded.thread_jid,
+                sender_jid=excluded.sender_jid,
+                participant_jid=excluded.participant_jid,
+                from_me=excluded.from_me,
+                timestamp_ms=excluded.timestamp_ms,
+                enc_type=excluded.enc_type,
+                plaintext=excluded.plaintext,
+                message_bytes=excluded.message_bytes`,
+            [
+                this.options.sessionId,
+                record.id,
+                record.threadJid,
+                record.senderJid ?? null,
+                record.participantJid ?? null,
+                record.fromMe ? 1 : 0,
+                record.timestampMs ?? null,
+                record.encType ?? null,
+                record.plaintext ?? null,
+                record.messageBytes ?? null
+            ]
+        )
     }
 }

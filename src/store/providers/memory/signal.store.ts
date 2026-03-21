@@ -196,6 +196,14 @@ export class WaSignalMemoryStore implements WaSignalStoreContract {
         return this.signalSessions.get(signalAddressKey(address)) ?? null
     }
 
+    public async getSessionsBatch(
+        addresses: readonly SignalAddress[]
+    ): Promise<readonly (SignalSessionRecord | null)[]> {
+        return addresses.map(
+            (address) => this.signalSessions.get(signalAddressKey(address)) ?? null
+        )
+    }
+
     public async setSession(address: SignalAddress, session: SignalSessionRecord): Promise<void> {
         setBoundedMapEntry(
             this.signalSessions,
@@ -205,12 +213,37 @@ export class WaSignalMemoryStore implements WaSignalStoreContract {
         )
     }
 
+    public async setSessionsBatch(
+        entries: readonly {
+            readonly address: SignalAddress
+            readonly session: SignalSessionRecord
+        }[]
+    ): Promise<void> {
+        for (let index = 0; index < entries.length; index += 1) {
+            const entry = entries[index]
+            setBoundedMapEntry(
+                this.signalSessions,
+                signalAddressKey(entry.address),
+                entry.session,
+                this.maxSessions
+            )
+        }
+    }
+
     public async deleteSession(address: SignalAddress): Promise<void> {
         this.signalSessions.delete(signalAddressKey(address))
     }
 
     public async getRemoteIdentity(address: SignalAddress): Promise<Uint8Array | null> {
         return this.remoteIdentities.get(signalAddressKey(address)) ?? null
+    }
+
+    public async getRemoteIdentities(
+        addresses: readonly SignalAddress[]
+    ): Promise<readonly (Uint8Array | null)[]> {
+        return addresses.map(
+            (address) => this.remoteIdentities.get(signalAddressKey(address)) ?? null
+        )
     }
 
     public async setRemoteIdentity(address: SignalAddress, identityKey: Uint8Array): Promise<void> {

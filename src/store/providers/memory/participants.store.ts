@@ -38,10 +38,6 @@ export class WaParticipantsMemoryStore implements WaParticipantsStore {
         this.cleanupTimer.unref()
     }
 
-    public getTtlMs(): number {
-        return this.ttlMs
-    }
-
     public async upsertGroupParticipants(snapshot: WaParticipantsSnapshot): Promise<void> {
         setBoundedMapEntry(
             this.records,

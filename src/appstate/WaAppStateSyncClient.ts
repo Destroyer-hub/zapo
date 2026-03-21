@@ -187,6 +187,11 @@ export class WaAppStateSyncClient {
             ...new Set<AppStateCollectionName>(options.collections ?? APP_STATE_DEFAULT_COLLECTIONS)
         ]
         try {
+            const initialCollectionStates = await this.store.getCollectionStates(collections)
+            for (let index = 0; index < collections.length; index += 1) {
+                context.collections.set(collections[index], initialCollectionStates[index])
+            }
+
             this.logger.info('app-state sync start', {
                 collections: collections.length,
                 pendingMutations: options.pendingMutations?.length ?? 0
@@ -910,20 +915,24 @@ export class WaAppStateSyncClient {
             readonly recordKeyId: Uint8Array
         }[]
     > {
+        const records = (snapshot.records ?? []).map((record) => ({
+            indexMac: decodeProtoBytes(
+                record.index?.blob,
+                `snapshot.record.index.blob (${collection})`
+            ),
+            valueBlob: decodeProtoBytes(
+                record.value?.blob,
+                `snapshot.record.value.blob (${collection})`
+            ),
+            recordKeyId: decodeProtoBytes(
+                record.keyId?.id,
+                `snapshot.record.keyId.id (${collection})`
+            )
+        }))
+        await this.preloadKeyData(records.map((record) => record.recordKeyId))
+
         return Promise.all(
-            (snapshot.records ?? []).map(async (record) => {
-                const indexMac = decodeProtoBytes(
-                    record.index?.blob,
-                    `snapshot.record.index.blob (${collection})`
-                )
-                const valueBlob = decodeProtoBytes(
-                    record.value?.blob,
-                    `snapshot.record.value.blob (${collection})`
-                )
-                const recordKeyId = decodeProtoBytes(
-                    record.keyId?.id,
-                    `snapshot.record.keyId.id (${collection})`
-                )
+            records.map(async ({ indexMac, valueBlob, recordKeyId }) => {
                 const recordKeyData = await this.getKeyData(recordKeyId)
                 if (!recordKeyData) {
                     throw new WaAppStateMissingKeyError(
@@ -951,28 +960,35 @@ export class WaAppStateSyncClient {
         collection: AppStateCollectionName,
         patch: Proto.ISyncdPatch
     ): Promise<readonly DecryptedPatchMutation[]> {
-        return Promise.all(
-            (patch.mutations ?? []).map(async (mutation) => {
-                const operationCode = mutation.operation
-                if (operationCode === null || operationCode === undefined) {
-                    throw new Error(`patch mutation is missing operation (${collection})`)
-                }
-                const record = mutation.record
-                if (!record) {
-                    throw new Error(`patch mutation is missing record (${collection})`)
-                }
-                const indexMac = decodeProtoBytes(
+        const parsedMutations = (patch.mutations ?? []).map((mutation) => {
+            const operationCode = mutation.operation
+            if (operationCode === null || operationCode === undefined) {
+                throw new Error(`patch mutation is missing operation (${collection})`)
+            }
+            const record = mutation.record
+            if (!record) {
+                throw new Error(`patch mutation is missing record (${collection})`)
+            }
+            return {
+                operationCode,
+                indexMac: decodeProtoBytes(
                     record.index?.blob,
                     `patch.record.index.blob (${collection})`
-                )
-                const valueBlob = decodeProtoBytes(
+                ),
+                valueBlob: decodeProtoBytes(
                     record.value?.blob,
                     `patch.record.value.blob (${collection})`
-                )
-                const recordKeyId = decodeProtoBytes(
+                ),
+                recordKeyId: decodeProtoBytes(
                     record.keyId?.id,
                     `patch.record.keyId.id (${collection})`
                 )
+            }
+        })
+        await this.preloadKeyData(parsedMutations.map((mutation) => mutation.recordKeyId))
+
+        return Promise.all(
+            parsedMutations.map(async ({ operationCode, indexMac, valueBlob, recordKeyId }) => {
                 const recordKeyData = await this.getKeyData(recordKeyId)
                 if (!recordKeyData) {
                     throw new WaAppStateMissingKeyError(
@@ -1241,6 +1257,32 @@ export class WaAppStateSyncClient {
             compacted.set(collection, reversed.reverse())
         }
         return compacted
+    }
+
+    private async preloadKeyData(keyIds: readonly Uint8Array[]): Promise<void> {
+        if (keyIds.length === 0) {
+            return
+        }
+        const context = this.requireSyncContext()
+        const missingKeyIds: Uint8Array[] = []
+        const missingKeyHexes = new Set<string>()
+        for (let index = 0; index < keyIds.length; index += 1) {
+            const keyId = keyIds[index]
+            const keyHex = bytesToHex(keyId)
+            if (context.keys.has(keyHex) || missingKeyHexes.has(keyHex)) {
+                continue
+            }
+            missingKeyHexes.add(keyHex)
+            missingKeyIds.push(keyId)
+        }
+        if (missingKeyIds.length === 0) {
+            return
+        }
+
+        const loadedKeyData = await this.store.getSyncKeyDataBatch(missingKeyIds)
+        for (let index = 0; index < missingKeyIds.length; index += 1) {
+            context.keys.set(bytesToHex(missingKeyIds[index]), loadedKeyData[index] ?? null)
+        }
     }
 
     private async getKeyData(keyId: Uint8Array): Promise<Uint8Array | null> {

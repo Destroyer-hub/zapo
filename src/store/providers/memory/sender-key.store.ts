@@ -99,14 +99,6 @@ export class SenderKeyMemoryStore implements WaSenderKeyStoreContract {
         return record ?? null
     }
 
-    public async getDeviceSenderKeyDistribution(
-        groupId: string,
-        sender: SignalAddress
-    ): Promise<SenderKeyDistributionRecord | null> {
-        const record = this.senderDistributions.get(this.makeKey(groupId, sender))
-        return record ?? null
-    }
-
     public async getDeviceSenderKeyDistributions(
         groupId: string,
         senders: readonly SignalAddress[]
@@ -128,8 +120,10 @@ export class SenderKeyMemoryStore implements WaSenderKeyStoreContract {
         participants: readonly SignalAddress[]
     ): Promise<number> {
         let deleted = 0
-        for (const participant of participants) {
-            deleted += await this.deleteDeviceSenderKey(participant, groupId)
+        for (let index = 0; index < participants.length; index += 1) {
+            const participant = participants[index]
+            deleted += this.deleteMatching(this.senderKeys, participant, groupId)
+            deleted += this.deleteMatching(this.senderDistributions, participant, groupId)
         }
         return deleted
     }

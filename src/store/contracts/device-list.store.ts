@@ -5,11 +5,8 @@ export interface WaDeviceListSnapshot {
 }
 
 export interface WaDeviceListStore {
-    getTtlMs(): number
     destroy?(): Promise<void>
-    upsertUserDevices(snapshot: WaDeviceListSnapshot): Promise<void>
     upsertUserDevicesBatch(snapshots: readonly WaDeviceListSnapshot[]): Promise<void>
-    getUserDevices(userJid: string, nowMs?: number): Promise<WaDeviceListSnapshot | null>
     getUserDevicesBatch(
         userJids: readonly string[],
         nowMs?: number

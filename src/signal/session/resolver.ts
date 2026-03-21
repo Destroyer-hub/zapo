@@ -113,6 +113,8 @@ export function createSignalSessionResolver(options: {
         }
         const hasSessions = await signalProtocol.hasSessions(normalizedTargetAddresses)
         if (normalizedExpectedIdentityByJid) {
+            const identityAddresses: SignalAddress[] = []
+            const expectedSerializedIdentities: Uint8Array[] = []
             for (let index = 0; index < normalizedTargetJids.length; index += 1) {
                 if (!hasSessions[index]) {
                     continue
@@ -123,12 +125,15 @@ export function createSignalSessionResolver(options: {
                 if (!expectedIdentity) {
                     continue
                 }
-                const storedIdentity = await signalStore.getRemoteIdentity(
-                    normalizedTargetAddresses[index]
-                )
+                identityAddresses.push(normalizedTargetAddresses[index])
+                expectedSerializedIdentities.push(toSerializedPubKey(expectedIdentity))
+            }
+            const storedIdentities = await signalStore.getRemoteIdentities(identityAddresses)
+            for (let index = 0; index < storedIdentities.length; index += 1) {
+                const storedIdentity = storedIdentities[index]
                 if (
                     !storedIdentity ||
-                    !uint8Equal(storedIdentity, toSerializedPubKey(expectedIdentity))
+                    !uint8Equal(storedIdentity, expectedSerializedIdentities[index])
                 ) {
                     throw new Error('identity mismatch')
                 }

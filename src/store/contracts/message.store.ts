@@ -12,6 +12,7 @@ export interface WaStoredMessageRecord {
 
 export interface WaMessageStore {
     upsert(record: WaStoredMessageRecord): Promise<void>
+    upsertBatch(records: readonly WaStoredMessageRecord[]): Promise<void>
     getById(id: string): Promise<WaStoredMessageRecord | null>
     listByThread(
         threadJid: string,

@@ -49,19 +49,25 @@ test('memory retry/device-list stores expire entries and support cleanup', async
     await retryStore.destroy()
 
     const deviceListStore = new WaDeviceListMemoryStore(10, { maxUsers: 1 })
-    await deviceListStore.upsertUserDevices({
-        userJid: 'u1@s.whatsapp.net',
-        deviceJids: ['u1:1@s.whatsapp.net'],
-        updatedAtMs: 0
-    })
-    await deviceListStore.upsertUserDevices({
-        userJid: 'u2@s.whatsapp.net',
-        deviceJids: ['u2:1@s.whatsapp.net'],
-        updatedAtMs: 0
-    })
+    await deviceListStore.upsertUserDevicesBatch([
+        {
+            userJid: 'u1@s.whatsapp.net',
+            deviceJids: ['u1:1@s.whatsapp.net'],
+            updatedAtMs: 0
+        },
+        {
+            userJid: 'u2@s.whatsapp.net',
+            deviceJids: ['u2:1@s.whatsapp.net'],
+            updatedAtMs: 0
+        }
+    ])
 
-    assert.equal(await deviceListStore.getUserDevices('u1@s.whatsapp.net', 0), null)
-    assert.ok(await deviceListStore.getUserDevices('u2@s.whatsapp.net', 0))
+    const [u1Devices, u2Devices] = await deviceListStore.getUserDevicesBatch(
+        ['u1@s.whatsapp.net', 'u2@s.whatsapp.net'],
+        0
+    )
+    assert.equal(u1Devices, null)
+    assert.ok(u2Devices)
     await deviceListStore.destroy()
 })
 
@@ -81,6 +87,46 @@ test('memory signal/sender-key/appstate stores cover key workflows', async () =>
     assert.equal(await signalStore.getServerHasPreKeys(), false)
     await signalStore.setServerHasPreKeys(true)
     assert.equal(await signalStore.getServerHasPreKeys(), true)
+    const addressA = { user: '5511', server: 's.whatsapp.net', device: 0 } as const
+    const addressB = { user: '5522', server: 's.whatsapp.net', device: 0 } as const
+    const sessionA = {
+        local: { regId: 1, pubKey: new Uint8Array(33) },
+        remote: { regId: 2, pubKey: new Uint8Array(33) },
+        rootKey: new Uint8Array(32),
+        recvChains: [
+            {
+                ratchetPubKey: new Uint8Array(33),
+                nextMsgIndex: 0,
+                chainKey: new Uint8Array(32),
+                unusedMsgKeys: []
+            }
+        ],
+        sendChain: {
+            ratchetKey: { pubKey: new Uint8Array(33), privKey: new Uint8Array(32) },
+            nextMsgIndex: 0,
+            chainKey: new Uint8Array(32)
+        },
+        initialExchangeInfo: null,
+        prevSendChainHighestIndex: 0,
+        aliceBaseKey: null,
+        prevSessions: []
+    } as const
+    await signalStore.setSession(addressA, sessionA)
+    assert.deepEqual(await signalStore.getSessionsBatch([]), [])
+    assert.deepEqual(await signalStore.getSessionsBatch([addressA, addressB]), [sessionA, null])
+    const sessionB = {
+        ...sessionA,
+        remote: { ...sessionA.remote, regId: 3 }
+    }
+    await signalStore.setSessionsBatch([{ address: addressB, session: sessionB }])
+    assert.deepEqual(await signalStore.getSessionsBatch([addressA, addressB]), [sessionA, sessionB])
+    await signalStore.setRemoteIdentity(addressA, new Uint8Array([7]))
+    assert.deepEqual(await signalStore.getRemoteIdentities([]), [])
+    assert.deepEqual(await signalStore.getRemoteIdentities([addressA, addressB, addressA]), [
+        new Uint8Array([7]),
+        null,
+        new Uint8Array([7])
+    ])
 
     const senderKeyStore = new SenderKeyMemoryStore({
         maxSenderKeys: 10,
@@ -105,14 +151,20 @@ test('memory signal/sender-key/appstate stores cover key workflows', async () =>
         maxSyncKeys: 10,
         maxCollectionEntries: 10
     })
+    const keyId = new Uint8Array([0, 1, 0, 0, 0, 1])
     const inserted = await appStateStore.upsertSyncKeys([
         {
-            keyId: new Uint8Array([0, 1, 0, 0, 0, 1]),
+            keyId,
             keyData: new Uint8Array([9]),
             timestamp: 1
         }
     ])
     assert.equal(inserted, 1)
+    assert.deepEqual(await appStateStore.getSyncKeyDataBatch([]), [])
+    assert.deepEqual(
+        await appStateStore.getSyncKeyDataBatch([keyId, new Uint8Array([9, 9, 9]), keyId]),
+        [new Uint8Array([9]), null, new Uint8Array([9])]
+    )
 
     await appStateStore.setCollectionStates([
         {
@@ -124,4 +176,11 @@ test('memory signal/sender-key/appstate stores cover key workflows', async () =>
     ])
     const state = await appStateStore.getCollectionState(WA_APP_STATE_COLLECTIONS.REGULAR)
     assert.equal(state.version, 2)
+    const states = await appStateStore.getCollectionStates([
+        WA_APP_STATE_COLLECTIONS.REGULAR,
+        WA_APP_STATE_COLLECTIONS.CRITICAL_BLOCK
+    ])
+    assert.equal(states.length, 2)
+    assert.equal(states[0].version, 2)
+    assert.equal(states[1].initialized, false)
 })

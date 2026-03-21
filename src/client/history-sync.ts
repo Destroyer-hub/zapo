@@ -5,9 +5,9 @@ import type { WaClientEventMap, WaHistorySyncChunkEvent } from '@client/types'
 import type { Logger } from '@infra/log/types'
 import type { WaMediaTransferClient } from '@media/WaMediaTransferClient'
 import { proto, type Proto } from '@proto'
-import type { WaContactStore } from '@store/contracts/contact.store'
-import type { WaMessageStore } from '@store/contracts/message.store'
-import type { WaThreadStore } from '@store/contracts/thread.store'
+import type { WaContactStore, WaStoredContactRecord } from '@store/contracts/contact.store'
+import type { WaMessageStore, WaStoredMessageRecord } from '@store/contracts/message.store'
+import type { WaStoredThreadRecord, WaThreadStore } from '@store/contracts/thread.store'
 import { decodeProtoBytes, toBytesView } from '@util/bytes'
 import { longToNumber } from '@util/primitives'
 
@@ -55,70 +55,61 @@ export async function processHistorySyncNotification(
     })
 
     const nowMs = Date.now()
-    const pushnameUpserts: Promise<void>[] = []
+    const contacts: WaStoredContactRecord[] = []
     for (const pn of historySync.pushnames) {
         if (!pn.id) {
             continue
         }
-        pushnameUpserts.push(
-            deps.contactStore.upsert({
-                jid: pn.id,
-                pushName: pn.pushname ?? undefined,
-                lastUpdatedMs: nowMs
-            })
-        )
+        contacts.push({
+            jid: pn.id,
+            pushName: pn.pushname ?? undefined,
+            lastUpdatedMs: nowMs
+        })
     }
 
+    const threads: WaStoredThreadRecord[] = []
+    const messages: WaStoredMessageRecord[] = []
     let messagesCount = 0
-    await Promise.all([
-        Promise.all(
-            historySync.conversations.map(async (conversation) => {
-                const threadJid = conversation.id
-                if (!threadJid) {
-                    deps.logger.debug('skipping history sync conversation without thread jid')
-                    return
-                }
+    for (const conversation of historySync.conversations) {
+        const threadJid = conversation.id
+        if (!threadJid) {
+            deps.logger.debug('skipping history sync conversation without thread jid')
+            continue
+        }
 
-                const upserts: Promise<void>[] = [
-                    deps.threadStore.upsert({
-                        jid: threadJid,
-                        name: conversation.name ?? undefined,
-                        unreadCount: conversation.unreadCount ?? undefined,
-                        archived: conversation.archived ?? undefined,
-                        pinned: conversation.pinned ?? undefined,
-                        muteEndMs: longToNumber(conversation.muteEndTime) || undefined,
-                        markedAsUnread: conversation.markedAsUnread ?? undefined,
-                        ephemeralExpiration: conversation.ephemeralExpiration ?? undefined
-                    })
-                ]
-                let conversationMessagesCount = 0
-                for (const histMsg of conversation.messages ?? []) {
-                    const webMsg = histMsg.message
-                    if (!webMsg?.key?.id) {
-                        continue
-                    }
-                    const timestampMs = longToNumber(webMsg.messageTimestamp) * 1000
-                    upserts.push(
-                        deps.messageStore.upsert({
-                            id: webMsg.key.id,
-                            threadJid,
-                            senderJid: webMsg.key.participant ?? undefined,
-                            fromMe: webMsg.key.fromMe === true,
-                            timestampMs: timestampMs || undefined,
-                            messageBytes: webMsg.message
-                                ? proto.Message.encode(webMsg.message).finish()
-                                : undefined
-                        })
-                    )
-                    conversationMessagesCount += 1
-                }
-
-                await Promise.all(upserts)
-                messagesCount += conversationMessagesCount
+        threads.push({
+            jid: threadJid,
+            name: conversation.name ?? undefined,
+            unreadCount: conversation.unreadCount ?? undefined,
+            archived: conversation.archived ?? undefined,
+            pinned: conversation.pinned ?? undefined,
+            muteEndMs: longToNumber(conversation.muteEndTime) || undefined,
+            markedAsUnread: conversation.markedAsUnread ?? undefined,
+            ephemeralExpiration: conversation.ephemeralExpiration ?? undefined
+        })
+        for (const histMsg of conversation.messages ?? []) {
+            const webMsg = histMsg.message
+            if (!webMsg?.key?.id) {
+                continue
+            }
+            const timestampMs = longToNumber(webMsg.messageTimestamp) * 1000
+            messages.push({
+                id: webMsg.key.id,
+                threadJid,
+                senderJid: webMsg.key.participant ?? undefined,
+                fromMe: webMsg.key.fromMe === true,
+                timestampMs: timestampMs || undefined,
+                messageBytes: webMsg.message
+                    ? proto.Message.encode(webMsg.message).finish()
+                    : undefined
             })
-        ),
-        Promise.all(pushnameUpserts)
-    ])
+            messagesCount += 1
+        }
+    }
+
+    await deps.contactStore.upsertBatch(contacts)
+    await deps.threadStore.upsertBatch(threads)
+    await deps.messageStore.upsertBatch(messages)
 
     const event: WaHistorySyncChunkEvent = {
         syncType,

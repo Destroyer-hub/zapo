@@ -23,10 +23,6 @@ export class WaParticipantsSqliteStore extends BaseSqliteStore implements WaPart
         this.ttlMs = ttlMs
     }
 
-    public getTtlMs(): number {
-        return this.ttlMs
-    }
-
     public async upsertGroupParticipants(snapshot: WaParticipantsSnapshot): Promise<void> {
         const db = await this.getConnection()
         db.run(

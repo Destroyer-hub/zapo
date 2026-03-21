@@ -9,6 +9,7 @@ export interface WaStoredContactRecord {
 
 export interface WaContactStore {
     upsert(record: WaStoredContactRecord): Promise<void>
+    upsertBatch(records: readonly WaStoredContactRecord[]): Promise<void>
     getByJid(jid: string): Promise<WaStoredContactRecord | null>
     deleteByJid(jid: string): Promise<number>
     clear(): Promise<void>

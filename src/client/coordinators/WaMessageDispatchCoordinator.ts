@@ -227,9 +227,11 @@ export class WaMessageDispatchCoordinator {
         options: WaSendMessageOptions = {}
     ): Promise<WaMessagePublishResult> {
         const recipientJid = normalizeRecipientJid(to)
-        const message = await this.buildMessageContent(content)
+        const [message, sendOptions] = await Promise.all([
+            this.buildMessageContent(content),
+            this.withResolvedMessageId(options)
+        ])
         const messageWithSecret = await ensureMessageSecret(message)
-        const sendOptions = await this.withResolvedMessageId(options)
         const plaintext = await writeRandomPadMax16(
             proto.Message.encode(messageWithSecret).finish()
         )
@@ -328,17 +330,20 @@ export class WaMessageDispatchCoordinator {
             throw new Error('group direct send resolved no target devices')
         }
         await this.sessionResolver.ensureSessionsBatch(fanoutDeviceJids)
-        const participants = await Promise.all(
-            fanoutDeviceJids.map(async (targetJid) => {
-                const address = parseSignalAddressFromJid(targetJid)
-                const encrypted = await this.signalProtocol.encryptMessage(address, plaintext)
-                return {
-                    jid: targetJid,
-                    encType: encrypted.type,
-                    ciphertext: encrypted.ciphertext
-                }
-            })
+        const participantAddresses = fanoutDeviceJids.map((targetJid) =>
+            parseSignalAddressFromJid(targetJid)
         )
+        const encryptedParticipants = await this.signalProtocol.encryptMessagesBatch(
+            participantAddresses.map((address) => ({
+                address,
+                plaintext
+            }))
+        )
+        const participants = fanoutDeviceJids.map((targetJid, index) => ({
+            jid: targetJid,
+            encType: encryptedParticipants[index].type,
+            ciphertext: encryptedParticipants[index].ciphertext
+        }))
         const shouldAttachDeviceIdentity = participants.some(
             (participant) => participant.encType === 'pkmsg'
         )
@@ -666,20 +671,18 @@ export class WaMessageDispatchCoordinator {
             pendingTargetJids[index] = pendingTargets[index].jid
         }
         await this.sessionResolver.ensureSessionsBatch(pendingTargetJids)
-        const distributionParticipants = await Promise.all(
-            pendingTargets.map(async (target) => {
-                const encrypted = await this.signalProtocol.encryptMessage(
-                    target.address,
-                    distributionPayload
-                )
-                return {
-                    jid: target.jid,
-                    address: target.address,
-                    encType: encrypted.type,
-                    ciphertext: encrypted.ciphertext
-                }
-            })
+        const encryptedDistributionParticipants = await this.signalProtocol.encryptMessagesBatch(
+            pendingTargets.map((target) => ({
+                address: target.address,
+                plaintext: distributionPayload
+            }))
         )
+        const distributionParticipants = pendingTargets.map((target, index) => ({
+            jid: target.jid,
+            address: target.address,
+            encType: encryptedDistributionParticipants[index].type,
+            ciphertext: encryptedDistributionParticipants[index].ciphertext
+        }))
         return {
             fanoutDeviceJids,
             distributionParticipants
@@ -736,31 +739,32 @@ export class WaMessageDispatchCoordinator {
               )
             : null
 
+        const participantRequests = targets.map((target) => ({
+            target,
+            address: parseSignalAddressFromJid(target.jid),
+            expectedIdentity:
+                target.userJid === recipientUserJid ? sendOptions.expectedIdentity : undefined,
+            plaintext:
+                selfDevicePlaintext && target.userJid === meUserJid
+                    ? selfDevicePlaintext
+                    : plaintext
+        }))
+        const encryptedParticipants = await this.signalProtocol.encryptMessagesBatch(
+            participantRequests.map((request) => ({
+                address: request.address,
+                plaintext: request.plaintext,
+                expectedIdentity: request.expectedIdentity
+            }))
+        )
         const participants: {
             readonly jid: string
             readonly encType: 'msg' | 'pkmsg'
             readonly ciphertext: Uint8Array
-        }[] = await Promise.all(
-            targets.map(async (target) => {
-                const address = parseSignalAddressFromJid(target.jid)
-                const expectedIdentity =
-                    target.userJid === recipientUserJid ? sendOptions.expectedIdentity : undefined
-                const plaintextForTarget =
-                    selfDevicePlaintext && target.userJid === meUserJid
-                        ? selfDevicePlaintext
-                        : plaintext
-                const encrypted = await this.signalProtocol.encryptMessage(
-                    address,
-                    plaintextForTarget,
-                    expectedIdentity
-                )
-                return {
-                    jid: target.jid,
-                    encType: encrypted.type,
-                    ciphertext: encrypted.ciphertext
-                }
-            })
-        )
+        }[] = participantRequests.map((request, index) => ({
+            jid: request.target.jid,
+            encType: encryptedParticipants[index].type,
+            ciphertext: encryptedParticipants[index].ciphertext
+        }))
 
         const shouldAttachDeviceIdentity = participants.some(
             (participant) => participant.encType === 'pkmsg'

@@ -34,15 +34,6 @@ export class WaDeviceListSqliteStore extends BaseSqliteStore implements WaDevice
         )
     }
 
-    public getTtlMs(): number {
-        return this.ttlMs
-    }
-
-    public async upsertUserDevices(snapshot: WaDeviceListSnapshot): Promise<void> {
-        const db = await this.getConnection()
-        this.upsertUserDevicesRow(db, snapshot)
-    }
-
     public async upsertUserDevicesBatch(snapshots: readonly WaDeviceListSnapshot[]): Promise<void> {
         if (snapshots.length === 0) {
             return
@@ -52,38 +43,6 @@ export class WaDeviceListSqliteStore extends BaseSqliteStore implements WaDevice
                 this.upsertUserDevicesRow(db, snapshot)
             }
         })
-    }
-
-    public async getUserDevices(
-        userJid: string,
-        nowMs = Date.now()
-    ): Promise<WaDeviceListSnapshot | null> {
-        const db = await this.getConnection()
-        const row = db.get<DeviceListRow>(
-            `SELECT user_jid, device_jids_json, updated_at_ms, expires_at_ms
-             FROM device_list_cache
-             WHERE session_id = ? AND user_jid = ?`,
-            [this.options.sessionId, userJid]
-        )
-        if (!row) {
-            return null
-        }
-
-        const expiresAtMs = asNumber(row.expires_at_ms, 'device_list_cache.expires_at_ms')
-        if (expiresAtMs <= nowMs) {
-            db.run(
-                `DELETE FROM device_list_cache
-                 WHERE session_id = ? AND user_jid = ?`,
-                [this.options.sessionId, userJid]
-            )
-            return null
-        }
-
-        return {
-            userJid: asString(row.user_jid, 'device_list_cache.user_jid'),
-            deviceJids: decodeDeviceJids(row.device_jids_json),
-            updatedAtMs: asNumber(row.updated_at_ms, 'device_list_cache.updated_at_ms')
-        }
     }
 
     public async getUserDevicesBatch(

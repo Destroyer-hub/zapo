@@ -31,9 +31,21 @@ export interface WaSignalStore {
     hasSession(address: SignalAddress): Promise<boolean>
     hasSessions(addresses: readonly SignalAddress[]): Promise<readonly boolean[]>
     getSession(address: SignalAddress): Promise<SignalSessionRecord | null>
+    getSessionsBatch(
+        addresses: readonly SignalAddress[]
+    ): Promise<readonly (SignalSessionRecord | null)[]>
     setSession(address: SignalAddress, session: SignalSessionRecord): Promise<void>
+    setSessionsBatch(
+        entries: readonly {
+            readonly address: SignalAddress
+            readonly session: SignalSessionRecord
+        }[]
+    ): Promise<void>
     deleteSession(address: SignalAddress): Promise<void>
     getRemoteIdentity(address: SignalAddress): Promise<Uint8Array | null>
+    getRemoteIdentities(
+        addresses: readonly SignalAddress[]
+    ): Promise<readonly (Uint8Array | null)[]>
     setRemoteIdentity(address: SignalAddress, identityKey: Uint8Array): Promise<void>
     setRemoteIdentities(
         entries: readonly {

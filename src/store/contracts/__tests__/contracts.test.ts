@@ -69,6 +69,14 @@ async function runMessageStoreContract(
                 fromMe: boolean
                 timestampMs?: number
             }) => Promise<void>
+            upsertBatch: (
+                records: readonly {
+                    id: string
+                    threadJid: string
+                    fromMe: boolean
+                    timestampMs?: number
+                }[]
+            ) => Promise<void>
             getById: (id: string) => Promise<unknown>
             listByThread: (
                 threadJid: string,
@@ -83,7 +91,9 @@ async function runMessageStoreContract(
     const store = await factory()
     try {
         await store.upsert({ id: 'm1', threadJid: 'thread-1', fromMe: true, timestampMs: 10 })
-        await store.upsert({ id: 'm2', threadJid: 'thread-1', fromMe: false, timestampMs: 20 })
+        await store.upsertBatch([
+            { id: 'm2', threadJid: 'thread-1', fromMe: false, timestampMs: 20 }
+        ])
 
         assert.ok(await store.getById('m1'))
         const listed = await store.listByThread('thread-1', 1)
@@ -103,6 +113,9 @@ async function runThreadStoreContract(
     factory: () => Promise<
         {
             upsert: (record: { jid: string; name?: string; unreadCount?: number }) => Promise<void>
+            upsertBatch: (
+                records: readonly { jid: string; name?: string; unreadCount?: number }[]
+            ) => Promise<void>
             getByJid: (jid: string) => Promise<unknown>
             list: (limit?: number) => Promise<readonly unknown[]>
             deleteByJid: (jid: string) => Promise<number>
@@ -112,7 +125,7 @@ async function runThreadStoreContract(
 ): Promise<void> {
     const store = await factory()
     try {
-        await store.upsert({ jid: 'thread-1', name: 'Thread 1', unreadCount: 2 })
+        await store.upsertBatch([{ jid: 'thread-1', name: 'Thread 1', unreadCount: 2 }])
         assert.ok(await store.getByJid('thread-1'))
         assert.equal((await store.list(1)).length, 1)
         assert.equal(await store.deleteByJid('thread-1'), 1)
@@ -131,6 +144,13 @@ async function runContactStoreContract(
                 pushName?: string
                 lastUpdatedMs: number
             }) => Promise<void>
+            upsertBatch: (
+                records: readonly {
+                    jid: string
+                    pushName?: string
+                    lastUpdatedMs: number
+                }[]
+            ) => Promise<void>
             getByJid: (jid: string) => Promise<unknown>
             deleteByJid: (jid: string) => Promise<number>
             clear: () => Promise<void>
@@ -139,7 +159,9 @@ async function runContactStoreContract(
 ): Promise<void> {
     const store = await factory()
     try {
-        await store.upsert({ jid: '5511@s.whatsapp.net', pushName: 'A', lastUpdatedMs: Date.now() })
+        await store.upsertBatch([
+            { jid: '5511@s.whatsapp.net', pushName: 'A', lastUpdatedMs: Date.now() }
+        ])
         assert.ok(await store.getByJid('5511@s.whatsapp.net'))
         assert.equal(await store.deleteByJid('5511@s.whatsapp.net'), 1)
         await store.clear()

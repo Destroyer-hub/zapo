@@ -29,6 +29,12 @@ export class WaContactMemoryStore implements Contract {
         setBoundedMapEntry(this.contacts, record.jid, record, this.maxContacts)
     }
 
+    public async upsertBatch(records: readonly WaStoredContactRecord[]): Promise<void> {
+        for (const record of records) {
+            setBoundedMapEntry(this.contacts, record.jid, record, this.maxContacts)
+        }
+    }
+
     public async getByJid(jid: string): Promise<WaStoredContactRecord | null> {
         return this.contacts.get(jid) ?? null
     }

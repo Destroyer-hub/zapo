@@ -29,6 +29,10 @@ import type {
 import type { WaSignalStore } from '@store/contracts/signal.store'
 import { uint8Equal } from '@util/bytes'
 
+function signalAddressMapKey(address: SignalAddress): string {
+    return `${address.user}\u0001${address.server ?? ''}\u0001${address.device}`
+}
+
 export class SignalProtocol {
     private readonly store: WaSignalStore
     private readonly logger: Logger
@@ -69,26 +73,84 @@ export class SignalProtocol {
         readonly ciphertext: Uint8Array
         readonly baseKey: Uint8Array | null
     }> {
-        const session = await this.store.getSession(address)
-        if (!session) {
-            throw new Error('signal session not found')
-        }
-        if (
-            expectedIdentity &&
-            !uint8Equal(toSerializedPubKey(expectedIdentity), session.remote.pubKey)
-        ) {
-            throw new Error('identity mismatch')
+        const [encrypted] = await this.encryptMessagesBatch([
+            { address, plaintext, expectedIdentity }
+        ])
+        return encrypted
+    }
+
+    public async encryptMessagesBatch(
+        requests: readonly {
+            readonly address: SignalAddress
+            readonly plaintext: Uint8Array
+            readonly expectedIdentity?: Uint8Array
+        }[]
+    ): Promise<
+        readonly {
+            readonly type: 'msg' | 'pkmsg'
+            readonly ciphertext: Uint8Array
+            readonly baseKey: Uint8Array | null
+        }[]
+    > {
+        if (requests.length === 0) {
+            return []
         }
 
-        const [updatedSession, encrypted] = await encryptMsg(session, plaintext)
-        await this.store.setSession(address, updatedSession)
-        if (!uint8Equal(updatedSession.remote.pubKey, session.remote.pubKey)) {
-            await this.store.setRemoteIdentity(address, updatedSession.remote.pubKey)
+        const addresses = requests.map((request) => request.address)
+        const storedSessions = await this.store.getSessionsBatch(addresses)
+        const latestSessionByAddress = new Map<string, SignalSessionRecord>()
+        const sessionUpdatesByAddress = new Map<
+            string,
+            { readonly address: SignalAddress; readonly session: SignalSessionRecord }
+        >()
+        const identityUpdatesByAddress = new Map<
+            string,
+            { readonly address: SignalAddress; readonly identityKey: Uint8Array }
+        >()
+        const results = new Array<{
+            readonly type: 'msg' | 'pkmsg'
+            readonly ciphertext: Uint8Array
+            readonly baseKey: Uint8Array | null
+        }>(requests.length)
+
+        for (let index = 0; index < requests.length; index += 1) {
+            const request = requests[index]
+            const address = request.address
+            const addressKey = signalAddressMapKey(address)
+            const session = latestSessionByAddress.get(addressKey) ?? storedSessions[index]
+            if (!session) {
+                throw new Error('signal session not found')
+            }
+            if (
+                request.expectedIdentity &&
+                !uint8Equal(toSerializedPubKey(request.expectedIdentity), session.remote.pubKey)
+            ) {
+                throw new Error('identity mismatch')
+            }
+
+            const [updatedSession, encrypted] = await encryptMsg(session, request.plaintext)
+            latestSessionByAddress.set(addressKey, updatedSession)
+            sessionUpdatesByAddress.set(addressKey, {
+                address,
+                session: updatedSession
+            })
+            if (!uint8Equal(updatedSession.remote.pubKey, session.remote.pubKey)) {
+                identityUpdatesByAddress.set(addressKey, {
+                    address,
+                    identityKey: updatedSession.remote.pubKey
+                })
+            }
+            results[index] = {
+                ...encrypted,
+                baseKey: updatedSession.aliceBaseKey
+            }
         }
-        return {
-            ...encrypted,
-            baseKey: updatedSession.aliceBaseKey
+
+        await this.store.setSessionsBatch([...sessionUpdatesByAddress.values()])
+        if (identityUpdatesByAddress.size > 0) {
+            await this.store.setRemoteIdentities([...identityUpdatesByAddress.values()])
         }
+        return results
     }
 
     public async decryptMessage(

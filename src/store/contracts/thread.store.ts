@@ -11,6 +11,7 @@ export interface WaStoredThreadRecord {
 
 export interface WaThreadStore {
     upsert(record: WaStoredThreadRecord): Promise<void>
+    upsertBatch(records: readonly WaStoredThreadRecord[]): Promise<void>
     getByJid(jid: string): Promise<WaStoredThreadRecord | null>
     list(limit?: number): Promise<readonly WaStoredThreadRecord[]>
     deleteByJid(jid: string): Promise<number>
