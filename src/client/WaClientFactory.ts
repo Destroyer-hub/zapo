@@ -19,6 +19,8 @@ import {
 } from '@client/coordinators/WaStreamControlCoordinator'
 import { WaTrustedContactTokenCoordinator } from '@client/coordinators/WaTrustedContactTokenCoordinator'
 import { handleDirtyBits, parseDirtyBits } from '@client/dirty'
+import { DEVICE_NOTIFICATION_ACTIONS, parseDeviceNotification } from '@client/events/devices'
+import { parseIdentityChangeNotification } from '@client/events/identity'
 import { parsePrivacyTokenNotification } from '@client/events/privacy-token'
 import {
     buildMediaMessageContent,
@@ -43,8 +45,10 @@ import {
     getWaCompanionPlatformId,
     WA_DEFAULTS,
     WA_NODE_TAGS,
+    WA_NOTIFICATION_TYPES,
     WA_PRIVACY_TOKEN_NOTIFICATION_TYPE
 } from '@protocol/constants'
+import { parseSignalAddressFromJid, toUserJid } from '@protocol/jid'
 import { createOutboundRetryTracker } from '@retry/tracker'
 import type { WaRetryDecryptFailureContext } from '@retry/types'
 import { SignalDeviceSyncApi } from '@signal/api/SignalDeviceSyncApi'
@@ -58,6 +62,7 @@ import { createSignalSessionResolver } from '@signal/session/resolver'
 import { SignalProtocol } from '@signal/session/SignalProtocol'
 import { WaKeepAlive } from '@transport/keepalive/WaKeepAlive'
 import { buildAckNode } from '@transport/node/builders/global'
+import { getFirstNodeChild } from '@transport/node/helpers'
 import { createUsyncSidGenerator } from '@transport/node/usync'
 import { WaNodeOrchestrator } from '@transport/node/WaNodeOrchestrator'
 import { WaNodeTransport } from '@transport/node/WaNodeTransport'
@@ -661,6 +666,207 @@ export function buildWaClientDependencies(input: {
             handleClientDirtyBits,
             incomingMessageAckOptions
         })
+    })
+
+    incomingNode.registerIncomingHandler({
+        tag: WA_NODE_TAGS.NOTIFICATION,
+        subtype: WA_NOTIFICATION_TYPES.ENCRYPT,
+        prepend: true,
+        handler: async (node) => {
+            const firstChild = getFirstNodeChild(node)
+            if (!firstChild) {
+                return false
+            }
+
+            const childTag = firstChild.tag
+
+            // <count value="N"/> — server prekeys running low
+            if (childTag === 'count') {
+                const ackNode = buildAckNode({
+                    kind: 'notification',
+                    node,
+                    includeType: false
+                })
+                await runtime.sendNode(ackNode)
+
+                const tasks = passiveTasks
+                if (!tasks) {
+                    logger.warn('encrypt-count: passive tasks not available')
+                    return true
+                }
+                await tasks.handlePreKeyLowNotification().catch((error) => {
+                    logger.warn('encrypt-count: prekey upload failed', {
+                        message: toError(error).message
+                    })
+                })
+                return true
+            }
+
+            // <digest/> — digest key sync
+            if (childTag === 'digest') {
+                const ackNode = buildAckNode({
+                    kind: 'notification',
+                    node,
+                    includeType: false
+                })
+                await runtime.sendNode(ackNode)
+
+                const tasks = passiveTasks
+                if (!tasks) {
+                    logger.warn('encrypt-digest: passive tasks not available')
+                    return true
+                }
+                await tasks.handleDigestNotification().catch((error) => {
+                    logger.warn('encrypt-digest: digest sync failed', {
+                        message: toError(error).message
+                    })
+                })
+                return true
+            }
+
+            // <identity/> — contact identity key changed
+            if (childTag === 'identity') {
+                const parsed = parseIdentityChangeNotification(node)
+                if (!parsed) {
+                    return false
+                }
+
+                const ackNode = buildAckNode({
+                    kind: 'notification',
+                    node,
+                    includeType: false
+                })
+                await runtime.sendNode(ackNode)
+
+                const address = parseSignalAddressFromJid(parsed.fromJid)
+
+                // ignore companion devices (non-primary)
+                if (address.device !== 0) {
+                    logger.debug('identity-change: ignoring companion device', {
+                        jid: parsed.fromJid
+                    })
+                    return true
+                }
+
+                // self-primary identity change → must disconnect
+                const meJid = getCurrentMeJid()
+                if (meJid) {
+                    const meUser = toUserJid(meJid)
+                    const fromUser = toUserJid(parsed.fromJid)
+                    if (meUser === fromUser) {
+                        logger.error('self primary identity changed, disconnecting')
+                        await disconnectWithClientSideEffects()
+                        return true
+                    }
+                }
+
+                const oldIdentity = await sessionStore.signal.getRemoteIdentity(address)
+
+                if (oldIdentity) {
+                    logger.info('identity-change: clearing session', {
+                        jid: parsed.fromJid
+                    })
+                    await sessionStore.signal.deleteSession(address)
+
+                    const userJid = toUserJid(parsed.fromJid)
+                    await trustedContactToken.reissueOnIdentityChange(userJid).catch((error) => {
+                        logger.warn('identity-change: reissue tc token failed', {
+                            message: toError(error).message
+                        })
+                    })
+                }
+
+                runtime.emitEvent('notification', {
+                    rawNode: node,
+                    stanzaId: parsed.stanzaId,
+                    chatJid: parsed.fromJid,
+                    stanzaType: 'encrypt',
+                    notificationType: 'encrypt',
+                    classification: 'core',
+                    details: {
+                        kind: 'identity_change',
+                        displayName: parsed.displayName,
+                        lid: parsed.lid,
+                        hadPreviousIdentity: !!oldIdentity
+                    }
+                })
+
+                return true
+            }
+
+            return false
+        }
+    })
+
+    incomingNode.registerIncomingHandler({
+        tag: WA_NODE_TAGS.NOTIFICATION,
+        subtype: WA_NOTIFICATION_TYPES.DEVICES,
+        prepend: true,
+        handler: async (node) => {
+            const parsed = parseDeviceNotification(node)
+            if (!parsed) {
+                return false
+            }
+
+            const ackNode = buildAckNode({
+                kind: 'notification',
+                node,
+                includeType: false
+            })
+            await runtime.sendNode(ackNode)
+
+            const userJid = toUserJid(parsed.fromJid)
+
+            if (parsed.action === DEVICE_NOTIFICATION_ACTIONS.REMOVE) {
+                const baseAddress = parseSignalAddressFromJid(parsed.fromJid)
+                for (const device of parsed.devices) {
+                    const address = {
+                        user: baseAddress.user,
+                        server: baseAddress.server,
+                        device: device.deviceId
+                    }
+                    await sessionStore.signal.deleteSession(address).catch((error) => {
+                        logger.warn('devices-notification: delete session failed', {
+                            message: toError(error).message
+                        })
+                    })
+                }
+            }
+
+            // invalidate device list cache so next fanout fetches fresh list
+            if (sessionStore.deviceList) {
+                await sessionStore.deviceList.deleteUserDevices(userJid).catch((error) => {
+                    logger.warn('devices-notification: invalidate cache failed', {
+                        message: toError(error).message
+                    })
+                })
+            }
+
+            // for update notifications, re-sync immediately
+            if (parsed.action === DEVICE_NOTIFICATION_ACTIONS.UPDATE) {
+                signalDeviceSync.syncDeviceList([userJid]).catch((error) => {
+                    logger.warn('devices-notification: sync device list failed', {
+                        message: toError(error).message
+                    })
+                })
+            }
+
+            runtime.emitEvent('notification', {
+                rawNode: node,
+                stanzaId: parsed.stanzaId,
+                chatJid: parsed.fromJid,
+                stanzaType: 'devices',
+                notificationType: 'devices',
+                classification: 'core',
+                details: {
+                    kind: 'device_list_change',
+                    action: parsed.action,
+                    devices: parsed.devices
+                }
+            })
+
+            return true
+        }
     })
 
     incomingNode.registerIncomingHandler({

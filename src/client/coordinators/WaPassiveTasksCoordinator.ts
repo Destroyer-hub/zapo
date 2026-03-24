@@ -79,6 +79,18 @@ export class WaPassiveTasksCoordinator {
             })
     }
 
+    public async handlePreKeyLowNotification(): Promise<void> {
+        await Promise.all([
+            this.signalStore.setServerHasPreKeys(false),
+            this.runtime.persistServerHasPreKeys(false)
+        ])
+        await this.uploadPreKeysIfMissing(false)
+    }
+
+    public async handleDigestNotification(): Promise<void> {
+        await this.validateDigestAndRecoverPreKeys()
+    }
+
     public resetInFlightState(): void {
         if (!this.passiveTasksPromise) {
             return
