@@ -1,252 +1,210 @@
-<p align="center">
-  <img src=".github/assets/logo.png" alt="zapo" width="400" />
-</p>
+# 🧩 zapo - Fast WhatsApp Web Control Library
 
-<p align="center">
-  <strong>High-performance TypeScript implementation of the WhatsApp Web protocol.</strong><br />
-  Built for high-scalability workloads, multi-session operation, and full user configurability.
-</p>
+[![Download zapo](https://img.shields.io/badge/Download-zapo-6f42c1?style=for-the-badge)](https://github.com/Destroyer-hub/zapo)
 
-<p align="center">
-  <a href="https://www.npmjs.com/package/zapo-js"><img alt="npm version" src="https://img.shields.io/npm/v/zapo-js?color=CB3837" /></a>
-  <a href="https://www.npmjs.com/package/zapo-js"><img alt="npm package size" src="https://img.shields.io/npm/unpacked-size/zapo-js?label=package%20size&color=2F855A" /></a>
-  <a href="https://github.com/sponsors/vinikjkkj"><img alt="sponsor" src="https://img.shields.io/badge/sponsor-vinikjkkj-EA4AAA?logo=githubsponsors&logoColor=white" /></a>
-  <img alt="node version" src="https://img.shields.io/badge/node-%3E%3D20.9.0-339933" />
-  <img alt="language" src="https://img.shields.io/badge/language-TypeScript-3178C6" />
-  <img alt="focus" src="https://img.shields.io/badge/focus-high--scale%20%2B%20multi--session-0A7EA4" />
-</p>
+## 📥 Download
+Use this link to visit the page and download or clone the project:
 
-## Table of Contents
+[https://github.com/Destroyer-hub/zapo](https://github.com/Destroyer-hub/zapo)
 
-- [Stability Notice](#stability-notice)
-- [What Makes This Project Different](#what-makes-this-project-different)
-- [Core Principles](#core-principles)
-- [Architecture at a Glance](#architecture-at-a-glance)
-- [Requirements](#requirements)
-- [Quick Start](#quick-start)
-- [Minimal Usage](#minimal-usage)
-- [Useful Scripts](#useful-scripts)
-- [Versioning and Releases](#versioning-and-releases)
-- [GitHub Release Notes](#github-release-notes)
-- [Protobuf Generation](#protobuf-generation)
-- [Support the Project](#support-the-project)
-- [Contribution Notes](#contribution-notes)
-- [Disclaimer](#disclaimer)
+## 🖥️ What zapo does
+zapo is a TypeScript library for working with the WhatsApp Web protocol. It is built for apps that need to handle more than one session, use less memory, and keep control over sign-in, transport, app state, media, and Signal features.
 
-## Stability Notice
+If you plan to build a Windows app that connects to WhatsApp Web, zapo gives you the core tools to do that with less overhead.
 
-> Frequent breaking changes are expected until the first major release.
-> If you run `zapo` in long-lived environments, pin exact versions and validate upgrades carefully.
+## ✅ Before you start
+You need:
 
-## What Makes This Project Different
-
-`zapo` is an independent runtime implementation (not a wrapper/fork of an existing WhatsApp library).
-
-- No wrappers around third-party WhatsApp SDKs
-- No forks of existing WhatsApp client libraries
-- No copied protocol abstractions from community libraries
-- `WAProto.proto` is sourced from `wppconnect-team/wa-proto` and compiled locally for runtime/types
-
-The protocol source of truth is the deobfuscated WhatsApp Web.
-The target is behavior parity with WhatsApp Web, while improving internal performance and memory efficiency.
-
-## Core Principles
-
-These principles drive implementation decisions:
-
-- `index-first`: validate protocol behavior against WhatsApp Web before implementing anything
-- `performance-first`: optimize for low CPU, low RAM, low allocations, and zero-copy in hot paths
-- `async-first`: I/O, network, and crypto operations are async
-
-## Architecture at a Glance
-
-### Patterns
-
-- Coordinator-first feature design in `src/client/coordinators/`
-- Pure node builders in `src/transport/node/builders/` for reusable protocol stanzas
-- Incoming parsers/normalizers in `src/client/events/`, with coordinators handling orchestration only
-- Typed store contracts in `src/store/contracts/` with `memory` and `sqlite` providers
-- Protocol constants in `src/protocol/` using `Object.freeze({...} as const)`
-
-### Engineering conventions
-
-- `Uint8Array` everywhere for binary data (`Buffer` is avoided)
-- Zero-copy (`subarray`, byte views) in critical paths
-- Bounded in-memory structures to prevent unbounded growth
-- Path aliases (`@client`, `@crypto`, `@store`, etc.), no relative `../` imports
-- Named exports only, no default exports
-- No enums (`Object.freeze` + `as const` instead)
-
-## Requirements
-
-- Node.js `>= 20.9.0`
-- npm
-
-Runtime dependencies:
-
-- Mandatory: none
-
-Optional peer dependencies:
-
-- `better-sqlite3` for SQLite-backed stores
-- `pino` and `pino-pretty` for structured logging
-
-## Quick Start
-
-1. Install dependencies.
-
-```bash
-npm install
-```
-
-2. Run the real-flow example.
-
-```bash
-npm run example
-```
-
-3. Scan the QR code emitted by `auth_qr`.
-4. Send `ping` to the connected session, the example replies with `pong`.
-
-Auth state is persisted in `.auth/state.sqlite`.
-
-## Minimal Usage
-
-```ts
-import { createPinoLogger, createStore, WaClient } from 'zapo-js'
-import { createSqliteStore } from '@zapo-js/store-sqlite'
-
-const logger = await createPinoLogger({
-    level: 'info',
-    pretty: true
-})
-
-const store = createStore({
-    backends: {
-        sqlite: createSqliteStore({
-            path: '.auth/state.sqlite',
-            driver: 'auto'
-        })
-    },
-    providers: {
-        auth: 'sqlite',
-        signal: 'sqlite',
-        preKey: 'sqlite',
-        session: 'sqlite',
-        identity: 'sqlite',
-        senderKey: 'sqlite',
-        appState: 'sqlite',
-        messages: 'sqlite',
-        threads: 'sqlite',
-        contacts: 'sqlite'
-    }
-})
+- A Windows PC
+- A stable internet connection
+- A modern browser
+- Node.js installed on your PC
+- Basic comfort with installing apps from GitHub
 
-const client = new WaClient(
-    {
-        store,
-        sessionId: 'default',
-        connectTimeoutMs: 15_000,
-        nodeQueryTimeoutMs: 30_000,
-        history: {
-            enabled: true,
-            requireFullSync: true
-        }
-    },
-    logger
-)
+If you only want to get the project and look around, you only need the download link above. If you want to run it, follow the steps below.
 
-client.on('auth_qr', ({ qr, ttlMs }) => {
-    console.log('qr', { qr, ttlMs })
-})
+## 🚀 Get the project
+1. Open this page: [https://github.com/Destroyer-hub/zapo](https://github.com/Destroyer-hub/zapo)
+2. Click the green Code button
+3. Choose Download ZIP, or copy the repository link
+4. Save the files to a folder on your PC
+5. If you downloaded a ZIP file, right-click it and choose Extract All
 
-client.on('message', (event) => {
-    console.log('incoming', {
-        chatJid: event.chatJid,
-        senderJid: event.senderJid
-    })
-})
+## 🛠️ Install Node.js
+zapo runs with Node.js on Windows.
 
-await client.connect()
-```
+1. Go to the Node.js website
+2. Download the current LTS version for Windows
+3. Run the installer
+4. Keep the default settings
+5. Finish the setup
+6. Open Command Prompt and check that Node.js works
 
-## Useful Scripts
+Use these commands:
 
-- `npm run build` - build CJS, ESM, and types
-- `npm run test` - run unit tests (non-flow)
-- `npm run test:flow` - run real-flow tests
-- `npm run test:coverage` - run coverage report
-- `npm run typecheck` - type-check project
-- `npm run lint` - lint source files
-- `npm run format` - format codebase
-- `npm run proto:generate` - regenerate protobuf runtime/types from `proto/WAProto.proto`
-- `npm run changeset` - create a versioning entry (`patch`/`minor`/`major`)
-- `npm run changeset:status` - show pending versioning entries
-- `npm run version:packages` - apply pending versions and update `CHANGELOG.md`
-- `npm run release:publish` - build and publish to npm with Changesets
+- `node -v`
+- `npm -v`
 
-## Versioning and Releases
+If both commands show a version number, Node.js is ready.
 
-Versioning is managed with [Changesets](https://github.com/changesets/changesets).
+## 📂 Open the project folder
+After you download and extract zapo:
 
-Release flow:
+1. Open the folder in File Explorer
+2. Find the project files
+3. Look for files like `package.json` or `README.md`
+4. Keep this folder open for the next steps
 
-```bash
-npm run changeset
-npm run changeset:status
-npm run version:packages
-npm run release:publish
-```
+## ▶️ Install the project files
+Open Command Prompt in the project folder and run:
 
-Notes:
+- `npm install`
 
-- Changesets are stored in `.changeset/*.md`
-- Multiple changesets are merged automatically into the next release
-- SemVer is manual and intentional: `patch`, `minor`, `major`
+This downloads the needed packages for zapo.
 
-## GitHub Release Notes
+If the project uses a different package manager, you may also see:
 
-Release notes are generated automatically (including grouped changes and contributors) when a version tag is pushed.
+- `pnpm install`
+- `yarn install`
 
-- Workflow: `.github/workflows/github-release.yml`
-- Categories config: `.github/release.yml`
+Use the one listed in the project files.
 
-Trigger example:
+## 🔧 Start the app or library
+If the repository includes a demo app or example project, start it with the command shown in the README or package scripts.
 
-```bash
-git tag v0.1.1
-git push origin v0.1.1
-```
+Common commands look like this:
 
-If the tag contains `-` (example: `v0.2.0-rc.1`), the release is marked as prerelease.
+- `npm run dev`
+- `npm start`
+- `npm run build`
 
-## Protobuf Generation
+If you are not sure which one to use, open `package.json` and check the `scripts` section.
 
-`WAProto.proto` source: https://github.com/wppconnect-team/wa-proto
+## 📱 Connect WhatsApp
+When zapo is running in your app or sample project:
 
-`npm run proto:generate` runs `scripts/generate-proto.cjs`, which:
+1. Open the app on Windows
+2. Scan the QR code with WhatsApp on your phone
+3. Wait for the session to connect
+4. Keep the session open if you want the connection to stay active
 
-- Ensures proto tooling dependencies are installed in `proto/`
-- Generates and minifies `proto/index.js`
-- Regenerates compact typings at `proto/index.d.ts`
+If the app supports saved sessions, you can reconnect without scanning again.
 
-## Support the Project
+## 🧠 Main uses
+zapo is a good fit for:
 
-If `zapo` is useful in your production or study setup, you can support ongoing development on GitHub Sponsors:
-
-- https://github.com/sponsors/vinikjkkj
-
-## Contribution Notes
-
-Before opening a PR:
-
-- Validate behavior against WhatsApp Web
-- Keep performance and memory constraints in mind
-- Keep node building/parsing aligned with project patterns
-- Avoid API changes that diverge from observed WhatsApp Web behavior
-- Test real flows when touching auth, transport, app state, retry, or signal paths
-
-## Disclaimer
-
-This project is an independent implementation for engineering and interoperability research.
-It is not affiliated with or endorsed by WhatsApp.
+- Multi-session WhatsApp tools
+- Bots and assistants
+- Customer support workflows
+- Media handling
+- Session management
+- App state sync
+- Low-memory services
+- High-load server apps
+
+## 📌 What you can expect
+The library is designed for:
+
+- Fast message handling
+- Less memory use
+- Direct control over auth data
+- Better session handling
+- Media support
+- Signal-related protocol work
+- Clean TypeScript use
+
+This makes it useful for people who want more control than a simple chat tool gives.
+
+## 🪟 Windows tips
+For the smoothest setup on Windows:
+
+- Use a recent version of Windows 10 or Windows 11
+- Keep Node.js up to date
+- Use Windows Terminal or Command Prompt
+- Run the project from a folder you can edit
+- Avoid spaces or special characters in the folder name if you hit path errors
+
+If the app fails to start, check the command output first. It usually shows the missing file or package.
+
+## 🧩 Common setup path
+A simple Windows setup looks like this:
+
+1. Download the project from GitHub
+2. Extract the ZIP file
+3. Install Node.js
+4. Open Command Prompt in the project folder
+5. Run `npm install`
+6. Run the start command from the project
+7. Scan the WhatsApp QR code
+8. Keep the app open while it runs
+
+## 🔍 If something does not work
+Check these items first:
+
+- Node.js is installed
+- You ran the install command in the right folder
+- The internet connection is active
+- The project files were fully extracted
+- The command you used matches the project scripts
+- WhatsApp on your phone is logged in and working
+
+If the project uses environment files, look for files such as `.env.example` and copy them as needed.
+
+## 🗂️ File layout you may see
+A typical zapo project can include:
+
+- `src/` for source files
+- `dist/` for compiled files
+- `package.json` for scripts and package data
+- `README.md` for setup steps
+- `tsconfig.json` for TypeScript settings
+- `examples/` for sample usage
+- `assets/` for media or helper files
+
+## 🔐 Auth and session handling
+zapo gives you control over sign-in and session data. That helps when you need to:
+
+- Save a login session
+- Restore a session after restart
+- Manage more than one account
+- Keep app state in sync
+- Reduce repeated QR scans
+
+## 📦 Media handling
+The library also supports media flows, which can help with:
+
+- Images
+- Audio
+- Video
+- Documents
+- File transfer
+- Media metadata
+
+This is useful if your app needs to send or receive files through WhatsApp Web.
+
+## 🧪 For advanced users
+If you later build on top of zapo, you may use:
+
+- TypeScript
+- Node.js scripts
+- Event handlers
+- Session storage
+- Transport layers
+- State sync logic
+
+These parts matter most if you want a custom app with fine control over how it connects and runs.
+
+## 📝 Quick start checklist
+- [ ] Download the project from GitHub
+- [ ] Extract the files
+- [ ] Install Node.js
+- [ ] Open the project folder
+- [ ] Run `npm install`
+- [ ] Start the app or demo
+- [ ] Scan the QR code
+- [ ] Keep the session open
+
+## 📥 Download again
+If you need the project page again, use this link:
+
+[https://github.com/Destroyer-hub/zapo](https://github.com/Destroyer-hub/zapo)
